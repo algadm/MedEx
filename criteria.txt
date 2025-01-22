@@ -1,0 +1,54 @@
+headache: "frequency", "location", "intensity", "type"
+migraine
+TMJ: "pain", "rating", "function", "disability"
+jaw: "pain", "function", "opening", "clicking", "locking"
+muscle: "pain", "tenderness", "soreness", "spasm"
+joint: "pain", "problem", "arthritis"
+neck: "pain", "problem"
+back: "pain", "problem", "disk", "herniat*"
+earache
+tinnitus
+vertigo
+hearing loss
+sleep: "apnea", "snoring", "daytime somnolence", "disorder", "insomnia"
+airway: "constrict*", "obstruct*", "decreas*", "collaps*"
+nasal: "septum", "trubinate", "sinus", "deviat*"
+breath*: "problem", "diffcult", "mouth"
+anxiety
+depression
+stress
+mood
+connective tissue
+autoimmune
+rheumatoid
+lupus
+fibromyalgia
+chronic fatigue
+medication*
+med
+drug
+splint
+appliance
+guard
+CPAP
+BiPAP
+surgery
+procedure
+operat*
+orthodontic* treatment
+ortho treatment
+physical therapy
+PT
+onset: "pain", "problem", "symptom"
+start*: "pain", "problem", "symptom"
+begin*: "pain", "problem", "symptom"
+origin: "pain", "problem", "symptom"
+duration: "pain", "problem", "symptom"
+history: "pain", "problem", "symptom"
+chronicity: "pain", "problem", "symptom"
+worst: "pain", "headache"
+severe*: "pain", "headache"
+extreme: "pain", "headache"
+max*: "pain", "headache"
+average daily pain
+pain: "constant", "continuous", "unrelenting", "persist*", "intermittent", "occasional", "episodic", "period*", "intensity", "level", "rating", "scale", "score", "location", "site", "area", "region", "aggravat*", "exacerbat*", "trigger*", "precipitat*", "worsen*", "increas*", "alleviat*", "reliev*", "help*", "decreas*", "reduc*", "improv*", "quality", "type", "nature", "character", "sharp", "dull", "ache", "throb*"

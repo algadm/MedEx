@@ -1,0 +1,62 @@
+{
+    "template_version": "1.0",
+    "validation_rules": {
+      "required_fields": [
+        "patient_demographics",
+        "primary_diagnosis",
+        "clinical_measurements",
+        "treatment_plan"
+      ],
+      "date_format": "MM/DD/YY",
+      "age_range": {"min": 0, "max": 80},
+      "pain_scale": {"min": 0, "max": 10}
+    },
+    "extraction_schema": {
+      "patient_demographics": {
+        "age": "integer",
+        "gender": "enum[male, female, other]",
+        "chief_complaint_duration": "string",
+        "initial_trigger": "string"
+      },
+      "primary_diagnosis": {
+        "condition": {
+          "type": "string",
+          "validation": ["must_contain_wilkes_stage"]
+        },
+        "etiology": {
+          "type": "enum",
+          "values": [
+            "I: Parafunction",
+            "II: Malocclusion",
+            "III: Direct trauma",
+            "IV: Indirect trauma",
+            "V: Systemic inflammatory conditions"
+          ]
+        }
+      },
+      "clinical_measurements": {
+        "maximum_vertical_opening": {
+          "type": "float",
+          "unit": "mm",
+          "normal_range": {"min": 35, "max": 50}
+        },
+        "lateral_excursion": {
+          "type": "enum",
+          "values": ["JTB", "NTB", "PB"]
+        },
+        "pain_scores": {
+          "right": {"type": "integer", "range": [0, 10]},
+          "left": {"type": "integer", "range": [0, 10]}
+        }
+      },
+      "medications": {
+        "type": "array",
+        "items": {
+          "name": "string",
+          "dosage": "string",
+          "frequency": "string",
+          "validation": ["must_be_real_medication"]
+        }
+      }
+    }
+  }

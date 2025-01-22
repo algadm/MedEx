@@ -1,20 +1,33 @@
-import argparse
-import os
 import re
-import json
+import csv
 import fitz
-import torch
 import string
 from docx import Document
 from transformers import BartTokenizer, BartForConditionalGeneration
 
+
 def load_model_and_tokenizer():
+    """
+    Load the BART model and tokenizer from the Hugging Face Transformers library.
+
+    Returns:
+        BartTokenizer, BartForConditionalGeneration: The tokenizer and model objects.
+    """
     model_name_or_path = "facebook/bart-large-cnn"
     tokenizer = BartTokenizer.from_pretrained(model_name_or_path)
     model = BartForConditionalGeneration.from_pretrained(model_name_or_path)
     return model, tokenizer
 
 def extract_text_from_pdf(pdf_path):
+    """
+    Extracts text from a PDF file using the PyMuPDF library (fitz).
+
+    Args:
+        pdf_path (str): Path to the PDF file.
+
+    Returns:
+        str: Cleaned text extracted from the PDF.
+    """
     doc = fitz.open(pdf_path)
     text = ""
     for page in doc:
@@ -22,6 +35,15 @@ def extract_text_from_pdf(pdf_path):
     return clean_text(text)
 
 def extract_text_from_word(docx_path):
+    """
+    Extracts text from a Word document using the python-docx library.
+
+    Args:
+        docx_path (str): Path to the Word document.
+
+    Returns:
+        str: Cleaned text extracted from the Word document.
+    """
     doc = Document(docx_path)
     return "\n".join([clean_text(paragraph.text) for paragraph in doc.paragraphs])
 
@@ -44,6 +66,15 @@ def clean_text(text):
     return text
 
 def load_criteria(file_path):
+    """
+    Load criteria and context filters from a text file.
+
+    Args:
+        file_path (str): Path to the text file containing criteria.
+
+    Returns:
+        List, Dict: List of criteria words and a dictionary of primary words and their associated context filters.
+    """
     criteria = []
     context_filters = {}
 
@@ -52,17 +83,16 @@ def load_criteria(file_path):
 
     for line in lines:
         line = line.strip()
-        if not line:  # skip empty lines
+        if not line:
             continue
         
-        if ":" in line:  # if line has a colon, it's a word with context filters
+        if ":" in line:
             word, context = line.split(":", 1)
             word = word.strip()
             context_terms = [term.strip().strip('"') for term in context.split(",")]
             context_filters[word] = context_terms
             criteria.append(word)
         else:
-            # If no colon, just add the word to the criteria list
             word = line.strip()
             criteria.append(word)
 
@@ -179,6 +209,16 @@ def split_text_by_paragraphs(text):
     return merged_paragraphs
 
 def create_chunks_from_paragraphs(text, max_chunk_size=1500):
+    """
+    Splits the text into chunks based on paragraph boundaries.
+
+    Args:
+        text (str): Text to split into chunks.
+        max_chunk_size (int, optional): Maximum number of characters to create the chunk. Defaults to 1500.
+
+    Returns:
+        List: List of text chunks.
+    """
     paragraphs = split_text_by_paragraphs(text)
     chunks = []
     current_chunk = ""
@@ -198,95 +238,111 @@ def create_chunks_from_paragraphs(text, max_chunk_size=1500):
     
     return chunks
 
-def generate_combined_summary(model, tokenizer, text, criteria_path, patient_id, max_chunk_size=2300):
-    chunks = create_chunks_from_paragraphs(text, max_chunk_size=max_chunk_size)
+def extract_key_value_pairs(text):
+    """
+    Extracts key-value pairs from text where the format is 'Key: Value'.
+
+    Args:
+        text (str): Text to extract key-value pairs from.
+
+    Returns:
+        dict: A dictionary containing extracted key-value pairs.
+    """
+    key_value_dict = {}
+    pattern = r"([A-Za-z ]+):\s*(\d+)"
+    matches = re.findall(pattern, text)
     
-    path = "/home/lucia/Documents/Alban/data/CLINICAL_NOTES/text_tab_word"
-    os.makedirs(path, exist_ok=True)
-
+    for key, value in matches:
+        key = key.strip()
+        # TODO: Change the key check to the ones who needs integer 
+        int_keys = ["Age", "Weight", "Height"]
+        if key in int_keys:
+            value = int(value)
+        key_value_dict[key] = value
     
-    # Load criteria and context filters from the file
-    criteria, context_filters = load_criteria(criteria_path)
+    return key_value_dict
+
+def save_dict_to_csv(data_dict, output_file_path):
+    """
+    Save a dictionary to a CSV file.
+
+    Args:
+        data_dict (dict): The dictionary to save, where keys are column headers and values are their corresponding values.
+        output_file_path (str): Path to the CSV file to save the data.
+    """
+    with open(output_file_path, mode='w', newline='', encoding='utf-8') as csv_file:
+        writer = csv.writer(csv_file)
         
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+        # Write headers
+        writer.writerow(["Key", "Value"])
+        
+        # Write key-value pairs
+        for key, value in data_dict.items():
+            writer.writerow([key, value])
+    print(f"CSV file saved to {output_file_path}")
     
-    summaries = []
-    for chunk in chunks:
-        # Find all occurrences of criteria words or partial words in the chunk
-        matches = find_matching_criteria_with_window(chunk, criteria, context_filters)
-        
-        # Format a prompt based on the found criteria matches
-        crit = format_prompt(matches)
-        
-        with open(os.path.join(path, f"{patient_id}_criteria.txt"), 'a', encoding='utf-8') as output_file:
-            output_file.write(f"```\n{chunk}\n```\n\n")
-        
-        # prompt = f"Prompt: {crit}\nText: {chunk}\n"
-        
-        # inputs = tokenizer(prompt, return_tensors="pt").to(device)
-        # summary_ids = model.generate(
-        #     inputs["input_ids"], 
-        #     max_length=300,
-        #     min_length=3,
-        #     length_penalty=1.0,
-        #     num_beams=8,
-        #     do_sample=True,
-        #     temperature=0.9,
-        #     top_k=40,
-        #     top_p=0.9
-        # )
-        # summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-        # summaries.append(summary)
-        
-        # print("Input:", prompt)
-        # print("Summary:", summary)
-        summaries = ""
+def initialize_key_value_summary():
+    """
+    Initialize a dictionary with default values based on the expected types.
 
-    final_summary = "\n\n".join(summaries)
-    return final_summary
-
-def process_notes(notes_folder, output_folder, criteria_path, model, tokenizer):
-    patient_files = {}
+    Returns:
+        dict: Dictionary with default values assigned based on the types.
+    """
+    KEYS_AND_TYPES = {
+    "patient_id": str,
+    "headache_intensity": str,
+    "headache_frequency": str,
+    "headache_location": str,
+    "average_daily_pain_intensity": str,
+    "diet_score": str,
+    "tmj_pain_rating": str,
+    "tmj_disability_rating": str,
+    "jaw_function_score": str,
+    "jaw_clicking": bool,
+    "jaw_locking": bool,
+    "muscle_pain_score": str,
+    "muscle_spasm_present": bool,
+    "muscle_tenderness_present": bool,
+    "muscle_soreness_present": bool,
+    "joint_pain_areas": str,
+    "joint_pain_level": str,
+    "joint_arthritis_present": bool,
+    "neck_pain_present": bool,
+    "back_pain_present": bool,
+    "earache_present": bool,
+    "tinnitus_present": bool,
+    "vertigo_present": bool,
+    "hearing_loss_present": bool,
+    "hearing_sensitivity_present": bool,
+    "sleep_apnea_diagnosed": bool,
+    "sleep_disorder_type": str,
+    "airway_obstruction_present": bool,
+    "anxiety_present": bool,
+    "depression_present": bool,
+    "stress_present": bool,
+    "autoimune_condition": str,
+    "autoimmune_condition_error": str,
+    "fibromyalgia_present": bool,
+    "chronic_fatigue_present": bool,
+    "current_medications": str,
+    "previous_medications": str,
+    "adverse_reactions": str,
+    "appliance_history": str,
+    "current_appliance": str,
+    "cpap_used": bool,
+    "apap_used": bool,
+    "bipap_used": bool,
+    "physical_therapy_status": str,
+    "pain_onset_date": str,
+    "pain_duration": str,
+    "pain_frequency": str,
+    "pain_triggers": str,
+    "pain_relieving_factors": str,
+    "pain_aggravating_factors": str
+    }
     
-    for file_name in os.listdir(notes_folder):
-        if not (file_name.endswith(".pdf") or file_name.endswith(".docx")):
-            continue
-        patient_id = file_name.split("_")[0]
-        if patient_id not in patient_files:
-            patient_files[patient_id] = []
-        patient_files[patient_id].append(file_name)
-
-    for patient_id, files in patient_files.items():
-        print(f"Processing patient {patient_id}...")
-        combined_text = ""
-        for file_name in files:
-            file_path = os.path.join(notes_folder, file_name)
-            if file_name.endswith(".pdf"):
-                combined_text += extract_text_from_pdf(file_path)
-            elif file_name.endswith(".docx"):
-                combined_text += extract_text_from_word(file_path)
-
-        summary = generate_combined_summary(model, tokenizer, combined_text, criteria_path, patient_id)
-        output_file_path = os.path.join(output_folder, f"{patient_id}_summary.txt")
-        
-        with open(output_file_path, 'w', encoding='utf-8') as output_file:
-            print(f"Saved summary to {output_file_path}")
-            output_file.write(f"{summary}\n")
-
-def main(notes_folder, output_folder, criteria_file):
-    model, tokenizer = load_model_and_tokenizer()
-
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-    
-    process_notes(notes_folder, output_folder, criteria_file, model, tokenizer)
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Summarize clinical notes using BART based on specific criteria")
-    parser.add_argument('--notes_folder', type=str, required=True, help="Path to the folder containing clinical notes")
-    parser.add_argument('--output_folder', type=str, required=True, help="Path to the folder to save the summaries")
-    parser.add_argument('--criteria_file', type=str, required=True, help="Path to the text file containing criteria")
-    
-    args = parser.parse_args()
-    main(args.notes_folder, args.output_folder, args.criteria_file)
+    defaults = {
+        str: "none",
+        bool: False,
+    }
+    return {key: defaults[expected_type] for key, expected_type in KEYS_AND_TYPES.items()}
