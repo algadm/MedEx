@@ -7,9 +7,10 @@ import torch
 import string
 from docx import Document
 from transformers import BartTokenizer, BartForConditionalGeneration
+from utilities import initialize_key_value_summary
 
 def load_model_and_tokenizer():
-    model_name_or_path = "facebook/bart-large-cnn"
+    model_name_or_path = "/home/lucia/Documents/Alban/MedSummarizer/fine_tuned_model_table_2"
     tokenizer = BartTokenizer.from_pretrained(model_name_or_path)
     model = BartForConditionalGeneration.from_pretrained(model_name_or_path)
     return model, tokenizer
@@ -178,28 +179,7 @@ def split_text_by_paragraphs(text):
 
     return merged_paragraphs
 
-def create_chunks_from_paragraphs(text, max_chunk_size=1800):
-    def split_to_sentences(paragraph, max_size):
-        """
-        Splits a paragraph into sentences that fit within the max size.
-        """
-        sentences = re.split(r'(?<=[.!?])\s+', paragraph)  # Split on sentence boundaries
-        chunk = ""
-        chunks = []
-
-        for sentence in sentences:
-            if len(chunk) + len(sentence) + 1 <= max_size:
-                chunk += sentence + " "
-            else:
-                if chunk:
-                    chunks.append(chunk.strip())
-                chunk = sentence + " "
-
-        if chunk:
-            chunks.append(chunk.strip())
-
-        return chunks
-
+def create_chunks_from_paragraphs(text, max_chunk_size=1500):
     paragraphs = split_text_by_paragraphs(text)
     chunks = []
     current_chunk = ""
@@ -211,65 +191,41 @@ def create_chunks_from_paragraphs(text, max_chunk_size=1800):
         if len(current_chunk) + len(para) + 1 <= max_chunk_size:
             current_chunk += para + "\n\n"  # Add paragraph with a newline separator
         else:
-            # If paragraph exceeds the limit, split it by sentences
-            para_sentences = split_to_sentences(para, max_chunk_size)
-
-            for sentence_chunk in para_sentences:
-                if len(current_chunk) + len(sentence_chunk) + 1 <= max_chunk_size:
-                    current_chunk += sentence_chunk + " "
-                else:
-                    chunks.append(current_chunk.strip())
-                    current_chunk = sentence_chunk + " "
+            chunks.append(current_chunk.strip())
+            current_chunk = para + "\n\n"  # Start the new chunk
 
     if current_chunk:
         chunks.append(current_chunk.strip())
-
+    
     return chunks
 
-def generate_combined_summary(model, tokenizer, text, criteria_path, patient_id, max_chunk_size=1800):
+def generate_combined_summary(model, tokenizer, text, criteria_path, patient_id, max_chunk_size=2300):
     chunks = create_chunks_from_paragraphs(text, max_chunk_size=max_chunk_size)
-    
-    path = "/home/lucia/Documents/Alban/data/CLINICAL_NOTES/text_tab_word_2"
-    os.makedirs(path, exist_ok=True)
-
-    
-    # Load criteria and context filters from the file
-    criteria, context_filters = load_criteria(criteria_path)
         
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
     summaries = []
     for chunk in chunks:
-        # Find all occurrences of criteria words or partial words in the chunk
-        matches = find_matching_criteria_with_window(chunk, criteria, context_filters)
+        dict = initialize_key_value_summary()
+        keys = list(dict.keys())
+        prompt = f"Using this list: {keys}\nSummarize this text: {chunk}\n"
         
-        # Format a prompt based on the found criteria matches
-        crit = format_prompt(matches)
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        summary_ids = model.generate(
+            inputs["input_ids"], 
+            max_length=300,
+            min_length=3,
+            length_penalty=1.0,
+            num_beams=8,
+            do_sample=True,
+            temperature=0.9,
+            top_k=40,
+            top_p=0.9
+        )
+        summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+        summaries.append(summary)
         
-        with open(os.path.join(path, f"{patient_id}_criteria.txt"), 'a', encoding='utf-8') as output_file:
-            output_file.write(f"```\n{chunk}\n```\n\n")
-        
-        # prompt = f"Prompt: {crit}\nText: {chunk}\n"
-        
-        # inputs = tokenizer(prompt, return_tensors="pt").to(device)
-        # summary_ids = model.generate(
-        #     inputs["input_ids"], 
-        #     max_length=300,
-        #     min_length=3,
-        #     length_penalty=1.0,
-        #     num_beams=8,
-        #     do_sample=True,
-        #     temperature=0.9,
-        #     top_k=40,
-        #     top_p=0.9
-        # )
-        # summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-        # summaries.append(summary)
-        
-        # print("Input:", prompt)
-        # print("Summary:", summary)
-        summaries = ""
 
     final_summary = "\n\n".join(summaries)
     return final_summary

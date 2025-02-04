@@ -290,13 +290,16 @@ def initialize_key_value_summary():
     """
     KEYS_AND_TYPES = {
     "patient_id": str,
+    "patient_age": str,
     "headache_intensity": str,
     "headache_frequency": str,
     "headache_location": str,
+    "migraine_history": bool,
+    "migraine_frequency": str,
     "average_daily_pain_intensity": str,
     "diet_score": str,
     "tmj_pain_rating": str,
-    "tmj_disability_rating": str,
+    "disability_rating": str,
     "jaw_function_score": str,
     "jaw_clicking": bool,
     "jaw_locking": bool,
@@ -320,8 +323,7 @@ def initialize_key_value_summary():
     "anxiety_present": bool,
     "depression_present": bool,
     "stress_present": bool,
-    "autoimune_condition": str,
-    "autoimmune_condition_error": str,
+    "autoimmune_condition": str,
     "fibromyalgia_present": bool,
     "chronic_fatigue_present": bool,
     "current_medications": str,
@@ -336,7 +338,7 @@ def initialize_key_value_summary():
     "pain_onset_date": str,
     "pain_duration": str,
     "pain_frequency": str,
-    "pain_triggers": str,
+    "onset_triggers": str,
     "pain_relieving_factors": str,
     "pain_aggravating_factors": str
     }
