@@ -9,17 +9,34 @@ import pandas as pd
 from docx import Document
 from datasets import load_dataset
 from sklearn.model_selection import train_test_split
+from utilities import initialize_key_value_summary
 from transformers import BartForConditionalGeneration, BartTokenizer, Trainer, TrainingArguments, DataCollatorForSeq2Seq, EarlyStoppingCallback
 
 from utilities import extract_text_from_pdf, extract_text_from_word, create_chunks_from_paragraphs
 
 def clean_summary(summary):
-    """
-    Cleans a single summary string by removing unnecessary newlines and ensuring consistent formatting.
+    """Cleans a single summary string by removing unnecessary newlines and ensuring consistent formatting.
+
+    Args:
+        summary (str): Text to clean.
+
+    Returns:
+        str: Text cleaned.
     """
     return summary.replace("\n", "\\").strip()
 
 def load_text(file_path):
+    """Reads the text from a file and returns it as a string.
+
+    Args:
+        file_path (str): Path to the file to read.
+
+    Raises:
+        ValueError: Raised if the file format is not supported.
+
+    Returns:
+        str: Text read from the file.
+    """
     if file_path.endswith(".pdf"):
         return clean_text(extract_text_from_pdf(file_path))
     elif file_path.endswith(".docx"):
@@ -48,7 +65,15 @@ def clean_text(text):
         text = text.replace(old, new)
     return text
 
-def save_notes_and_summaries_to_csv(notes_folder, summaries_folder, output_csv, max_chunk_size=2300):
+def save_notes_and_summaries_to_csv(notes_folder, summaries_folder, output_csv, max_chunk_size=3500):
+    """Save clinical notes and summaries to a CSV file.
+
+    Args:
+        notes_folder (str): Path to the folder containing clinical notes.
+        summaries_folder (str): Path to the folder containing the summaries.
+        output_csv (str): Path to save the output CSV file.
+        max_chunk_size (int, optional): Maximum number of characters used for each chunk. Defaults to 3500.
+    """
     texts, summaries = [], []
     
     for note_filename in os.listdir(notes_folder):
@@ -58,22 +83,18 @@ def save_notes_and_summaries_to_csv(notes_folder, summaries_folder, output_csv, 
             note_path, summary_path = os.path.join(notes_folder, note_filename), os.path.join(summaries_folder, summary_filename)
             
             if os.path.exists(note_path) and os.path.exists(summary_path):
-                # Extract the full text from the note
+                dict = initialize_key_value_summary()
+                keys = list(dict.keys())
+                
                 text = load_text(note_path)
                 summary = load_text(summary_path)
                 
-                # Split the text into chunks
                 chunks = create_chunks_from_paragraphs(text, max_chunk_size=max_chunk_size)
-                
-                # Split summary into corresponding chunks
                 summary_chunks = split_summary_text(summary)
-                # summary_chunks = [clean_summary(chunk) for chunk in summary_chunks]
                 
-                # Ensure chunks and summaries are paired correctly
                 if len(chunks) != len(summary_chunks):
                     print(f"Warning: Mismatch between text chunks and summary chunks for {patient_id}")
                 
-                # Add each chunk with its corresponding summary
                 for chunk, summary_chunk in zip(chunks, summary_chunks):
                     texts.append(chunk)
                     summaries.append(summary_chunk)
@@ -81,31 +102,73 @@ def save_notes_and_summaries_to_csv(notes_folder, summaries_folder, output_csv, 
     data = pd.DataFrame({"text": texts, "summary": summaries})
     data.to_csv(output_csv, index=False, quoting=csv.QUOTE_ALL)
     print(f"Data saved to {output_csv}")
-    return data
 
 def split_summary_text(summary_text):
-    """
-    Splits the summary text by '-----' delimiter, indicating different chunk summaries.
+    """Splits the summary text by a long '-' delimiter, indicating different chunk summaries.
+
+    Args:
+        summary_text (str): The summary text to split.
+
+    Returns:
+        list[str]: A list containing the split summary chunks.
     """
     return [chunk.strip() for chunk in summary_text.split("-"*100) if chunk.strip()]
 
-def extract_chunks(file_content):
-    # Use regex to find each prompt and its respective block
-    pattern = r"Prompt:.*?(?=Prompt:|$)"  # Matches each chunk starting with 'Prompt:' until the next 'Prompt:' or end of text
-    chunks = re.findall(pattern, file_content, flags=re.DOTALL)
-    # Strip trailing/leading whitespace for cleaner results
-    return [chunk.strip() for chunk in chunks]
+def assign_patient_ids(data):
+    """Fills missing patient_id values based on the last seen patient_id.
 
-def split_data(input_csv, output_dir):
-    data = pd.read_csv(input_csv)
-    train_data, temp_data = train_test_split(data, test_size=0.2, random_state=42)
-    val_data, test_data = train_test_split(temp_data, test_size=0.5, random_state=42)
+    Args:
+        data (pd.DataFrame): The input data.
+
+    Returns:
+        pd.DataFrame: The data with patient_id values filled.
+    """
+    current_patient_id = None
+    patient_ids = []
     
+    for index, row in data.iterrows():
+        # Extract patient_id from the 'summary' column using regex
+        extracted_id = pd.Series(row['summary']).str.extract(r'patient_id: (\w+)')[0].values[0]
+        
+        if pd.notna(extracted_id):
+            current_patient_id = extracted_id
+        
+        patient_ids.append(current_patient_id)
+    
+    data["patient_id"] = patient_ids
+    return data
+
+def split_data_by_patient(input_csv, output_dir):
+    """Splits the data into training, validation, and test sets based on unique patient IDs.
+
+    Args:
+        input_csv (str): Path to the input CSV file.
+        output_dir (str): Path to save the output CSV files.
+
+    Returns:
+        tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]: A tuple containing the training, validation, and test data.
+    """
+    data = pd.read_csv(input_csv)
+    data = assign_patient_ids(data)
+    data = data.dropna(subset=["patient_id"])
+    unique_patients = data["patient_id"].unique()
+
+    train_patients, temp_patients = train_test_split(unique_patients, train_size=0.8, random_state=42)
+    val_patients, test_patients = train_test_split(temp_patients, test_size=0.5, random_state=42)
+
+    train_data = data[data["patient_id"].isin(train_patients)]
+    val_data = data[data["patient_id"].isin(val_patients)]
+    test_data = data[data["patient_id"].isin(test_patients)]
+    
+    train_data = train_data.drop(columns=["patient_id"])
+    val_data = val_data.drop(columns=["patient_id"])
+    test_data = test_data.drop(columns=["patient_id"])
+
     train_data.to_csv(os.path.join(output_dir, "train.csv"), index=False, quoting=csv.QUOTE_ALL)
     val_data.to_csv(os.path.join(output_dir, "validation.csv"), index=False, quoting=csv.QUOTE_ALL)
     test_data.to_csv(os.path.join(output_dir, "test.csv"), index=False, quoting=csv.QUOTE_ALL)
-    print("Data split and saved.")
 
+    print("Data split by patient and saved.")
     return train_data, val_data, test_data
 
 def fine_tune(training_path, validation_path, output_dir):
@@ -123,10 +186,8 @@ def fine_tune(training_path, validation_path, output_dir):
 
     tokenized_datasets = dataset.map(preprocess_function, batched=True)
 
-    # Use DataCollatorForSeq2Seq for sequence-to-sequence tasks
     data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
 
-    # Training arguments
     training_args = TrainingArguments(
         output_dir=output_dir,
         eval_strategy="epoch",
@@ -151,24 +212,17 @@ def fine_tune(training_path, validation_path, output_dir):
         if isinstance(logits, tuple):
             logits = logits[0]
             
-        # Get predictions by taking the argmax (most probable token) along the last axis
         predictions = np.argmax(logits, axis=-1)
-        
-        # Decode the predictions and labels
         decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
         
-        # Replace label tokens set to -100 (ignore index) with the padding token for decoding
         labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
         decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
-        # Compute ROUGE scores
         result = metric.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
-        
-        # Since result now contains float values directly, no `.mid` is needed.
         result = {key: value * 100 for key, value in result.items()}
         return result
 
-    early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=3)  # Early stopping after no improvement for 3 epochs
+    early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=3)
     
     trainer = Trainer(
         model=model,
@@ -185,6 +239,7 @@ def fine_tune(training_path, validation_path, output_dir):
     results = trainer.evaluate()
     print(results)
 
+    model.config.forced_bos_token_id = 0 
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
     print(f"Model saved to {output_dir}")
@@ -203,8 +258,8 @@ if __name__ == "__main__":
     
     if args.prepare_data:
         output_csv = os.path.join(args.output_dir, "clinical_data.csv")
-        data = save_notes_and_summaries_to_csv(args.input_dir, args.summaries_dir, output_csv)
-        split_data(output_csv, args.output_dir)
+        save_notes_and_summaries_to_csv(args.input_dir, args.summaries_dir, output_csv)
+        split_data_by_patient(output_csv, args.output_dir)
     else:
         if args.train_csv and args.val_csv:
             fine_tune(args.train_csv, args.val_csv, args.output_dir)

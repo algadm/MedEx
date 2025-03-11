@@ -6,13 +6,13 @@ import fitz
 import torch
 import string
 from docx import Document
-from transformers import BartTokenizer, BartForConditionalGeneration, GenerationConfig
+from transformers import AutoTokenizer, LlamaForCausalLM
 from utilities import initialize_key_value_summary
 
 def load_model_and_tokenizer():
-    model_name_or_path = "/home/lucia/Documents/Alban/MedSummarizer/fine_tuned_model_table_eval_all_here_2"
-    tokenizer = BartTokenizer.from_pretrained(model_name_or_path)
-    model = BartForConditionalGeneration.from_pretrained(model_name_or_path)
+    model_name_or_path = "openlm-research/open_llama_7b"
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    model = LlamaForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float16)
     return model, tokenizer
 
 def extract_text_from_pdf(pdf_path):
@@ -199,48 +199,41 @@ def create_chunks_from_paragraphs(text, max_chunk_size=1500):
     
     return chunks
 
-def generate_combined_summary(model, tokenizer, text, max_chunk_size=3500, model_max_tokens=1024):
+def generate_combined_summary(model, tokenizer, text, criteria_path, patient_id, max_chunk_size=1800):
     chunks = create_chunks_from_paragraphs(text, max_chunk_size=max_chunk_size)
         
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
-    dict = initialize_key_value_summary()
-    keys = list(dict.keys())
     summaries = []
-    
-    generation_config = GenerationConfig(
-        max_length=800,
-        min_length=100,
-        length_penalty=1.0,
-        num_beams=8,
-        do_sample=True,
-        temperature=0.9,
-        top_k=40,
-        top_p=0.9,
-    )
-    
     for chunk in chunks:
-        # print(f"Generating summary for chunk: {chunk}")
-        inputs = tokenizer(chunk, return_tensors="pt").to(device)
-        # , truncation=True, max_length=model_max_tokens
+        dict = initialize_key_value_summary()
+        keys = list(dict.keys())
+        prompt = f"Using this list: {keys}\nSummarize this text: {chunk}\n"
         
-        if inputs["input_ids"].shape[1] > model_max_tokens:
-            print(f"WARNING: Chunk exceeded {model_max_tokens} tokens, truncating.")
-            
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
         summary_ids = model.generate(
             inputs["input_ids"], 
-            generation_config=generation_config
+            max_new_tokens=500,
+            min_length=3,
+            length_penalty=1.0,
+            num_beams=8,
+            do_sample=True,
+            temperature=0.9,
+            top_k=40,
+            top_p=0.9
         )
         summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-        # print(f"Generated summary: {summary}")
+        if summary.startswith(prompt):
+            summary = summary[len(prompt):].strip()
+        
         summaries.append(summary)
         
 
-    final_summary = "\n----------------------------------------------------------------------------------------------------\n".join(summaries)
+    final_summary = "\n\n".join(summaries)
     return final_summary
 
-def process_notes(notes_folder, output_folder, model, tokenizer):
+def process_notes(notes_folder, output_folder, criteria_path, model, tokenizer):
     patient_files = {}
     
     for file_name in os.listdir(notes_folder):
@@ -261,25 +254,26 @@ def process_notes(notes_folder, output_folder, model, tokenizer):
             elif file_name.endswith(".docx"):
                 combined_text += extract_text_from_word(file_path)
 
-        summary = generate_combined_summary(model, tokenizer, combined_text)
+        summary = generate_combined_summary(model, tokenizer, combined_text, criteria_path, patient_id)
         output_file_path = os.path.join(output_folder, f"{patient_id}_summary.txt")
         
         with open(output_file_path, 'w', encoding='utf-8') as output_file:
             print(f"Saved summary to {output_file_path}")
             output_file.write(f"{summary}\n")
 
-def main(notes_folder, output_folder):
+def main(notes_folder, output_folder, criteria_file):
     model, tokenizer = load_model_and_tokenizer()
 
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
     
-    process_notes(notes_folder, output_folder, model, tokenizer)
+    process_notes(notes_folder, output_folder, criteria_file, model, tokenizer)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Summarize clinical notes using BART based on specific criteria")
     parser.add_argument('--notes_folder', type=str, required=True, help="Path to the folder containing clinical notes")
     parser.add_argument('--output_folder', type=str, required=True, help="Path to the folder to save the summaries")
+    parser.add_argument('--criteria_file', type=str, required=True, help="Path to the text file containing criteria")
     
     args = parser.parse_args()
-    main(args.notes_folder, args.output_folder)
+    main(args.notes_folder, args.output_folder, args.criteria_file)

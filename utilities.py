@@ -173,7 +173,7 @@ def split_text_by_paragraphs(text):
     normalized_text = text.replace('\r\n', '\n').replace('\r', '\n')
 
     # Define common section headers that should act as paragraph boundaries
-    section_headers = ["CLINICAL EXAMINATION", "RADIOGRAPHIC EVALUATION", "WATERS VIEW", "IMPRESSION"]
+    section_headers = ["CLINICAL EXAMINATION", "RADIOGRAPHIC EVALUATION"]
     header_pattern = r'(' + '|'.join(section_headers) + r')\.?'
 
     # Split based on double newlines, numbered lists, or section headers
@@ -208,34 +208,103 @@ def split_text_by_paragraphs(text):
 
     return merged_paragraphs
 
-def create_chunks_from_paragraphs(text, max_chunk_size=1500):
-    """
-    Splits the text into chunks based on paragraph boundaries.
+def create_chunks_from_paragraphs(text, max_chunk_size=1800):
+    section_headers = ["CLINICAL EXAMINATION", "CLINICAL EVALUATION", "RADIOGRAPHIC EXAMINATION", "RADIOGRAPHIC EVALUATION"]
 
-    Args:
-        text (str): Text to split into chunks.
-        max_chunk_size (int, optional): Maximum number of characters to create the chunk. Defaults to 1500.
+    def split_to_sentences(paragraph, max_size):
+        """
+        Splits a paragraph into sentences that fit within the max size.
+        """
+        sentences = re.split(r'(?<=[.!?])\s+', paragraph)  # Split on sentence boundaries
+        chunk = ""
+        chunks = []
 
-    Returns:
-        List: List of text chunks.
-    """
+        for sentence in sentences:
+            if len(chunk) + len(sentence) + 1 <= max_size:
+                chunk += sentence + " "
+            else:
+                if chunk:
+                    chunks.append(chunk.strip())
+                chunk = sentence + " "
+
+        if chunk:
+            chunks.append(chunk.strip())
+
+        return chunks
+
     paragraphs = split_text_by_paragraphs(text)
     chunks = []
     current_chunk = ""
 
-    for para in paragraphs:
-        # Remove double spaces within paragraphs
-        para = re.sub(r'\s{2,}', ' ', para)
-
-        if len(current_chunk) + len(para) + 1 <= max_chunk_size:
-            current_chunk += para + "\n\n"  # Add paragraph with a newline separator
+    i = 0
+    while i < len(paragraphs):
+        para = re.sub(r'\s{2,}', ' ', paragraphs[i])
+        # Check if this paragraph starts with a section header
+        if any(para.lower().startswith(header.lower()) for header in section_headers):
+            # Accumulate the entire section: header + following non-header paragraphs.
+            section_paragraphs = [para]
+            j = i + 1
+            while j < len(paragraphs):
+                next_para = re.sub(r'\s{2,}', ' ', paragraphs[j])
+                if any(next_para.lower().startswith(header.lower()) for header in section_headers):
+                    break
+                section_paragraphs.append(next_para)
+                j += 1
+            section_text = "\n\n".join(section_paragraphs)
+            
+            # If current chunk plus the whole section fits, add it.
+            if len(current_chunk) + len(section_text) + 1 <= max_chunk_size:
+                current_chunk += section_text + "\n\n"
+            else:
+                # Flush current_chunk if not empty.
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = ""
+                # If the section itself is small enough, start a new chunk with it.
+                if len(section_text) <= max_chunk_size:
+                    current_chunk = section_text + "\n\n"
+                else:
+                    # Otherwise, process the section piece by piece.
+                    for sec_para in section_paragraphs:
+                        sec_para = re.sub(r'\s{2,}', ' ', sec_para)
+                        if len(sec_para) <= max_chunk_size:
+                            if len(current_chunk) + len(sec_para) + 1 <= max_chunk_size:
+                                current_chunk += sec_para + "\n\n"
+                            else:
+                                if current_chunk:
+                                    chunks.append(current_chunk.strip())
+                                current_chunk = sec_para + "\n\n"
+                        else:
+                            # Split long paragraphs by sentences.
+                            para_sentences = split_to_sentences(sec_para, max_chunk_size)
+                            for sentence_chunk in para_sentences:
+                                if len(current_chunk) + len(sentence_chunk) + 1 <= max_chunk_size:
+                                    current_chunk += sentence_chunk + " "
+                                else:
+                                    if current_chunk:
+                                        chunks.append(current_chunk.strip())
+                                    current_chunk = sentence_chunk + " "
+            i = j  # Move past the entire section.
         else:
-            chunks.append(current_chunk.strip())
-            current_chunk = para + "\n\n"  # Start the new chunk
+            # Regular paragraph (non-header)
+            if len(current_chunk) + len(para) + 1 <= max_chunk_size:
+                current_chunk += para + "\n\n"
+            else:
+                # If the paragraph itself is too long, split it.
+                para_sentences = split_to_sentences(para, max_chunk_size)
+                for sentence_chunk in para_sentences:
+                    if len(current_chunk) + len(sentence_chunk) + 1 <= max_chunk_size:
+                        current_chunk += sentence_chunk + " "
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk.strip())
+                        current_chunk = sentence_chunk + " "
+            i += 1
+
 
     if current_chunk:
         chunks.append(current_chunk.strip())
-    
+
     return chunks
 
 def extract_key_value_pairs(text):
@@ -294,46 +363,50 @@ def initialize_key_value_summary():
     "headache_intensity": str,
     "headache_frequency": str,
     "headache_location": str,
-    "migraine_history": bool,
+    "migraine_history": str,
     "migraine_frequency": str,
     "average_daily_pain_intensity": str,
     "diet_score": str,
     "tmj_pain_rating": str,
     "disability_rating": str,
     "jaw_function_score": str,
-    "jaw_clicking": bool,
-    "jaw_locking": bool,
+    "jaw_clicking": str,
+    "jaw_crepitus": str,
+    "jaw_locking": str,
+    "maximum_opening": str,
+    "maximum_opening_without_pain": str,
+    "disc_displacement": str,
     "muscle_pain_score": str,
-    "muscle_spasm_present": bool,
-    "muscle_tenderness_present": bool,
-    "muscle_soreness_present": bool,
+    "muscle_spasm_present": str,
+    "muscle_tenderness_present": str,
+    "muscle_stiffness_present": str,
+    "muscle_soreness_present": str,
     "joint_pain_areas": str,
-    "joint_pain_level": str,
-    "joint_arthritis_present": bool,
-    "neck_pain_present": bool,
-    "back_pain_present": bool,
-    "earache_present": bool,
-    "tinnitus_present": bool,
-    "vertigo_present": bool,
-    "hearing_loss_present": bool,
-    "hearing_sensitivity_present": bool,
-    "sleep_apnea_diagnosed": bool,
+    "joint_arthritis_present": str,
+    "neck_pain_present": str,
+    "back_pain_present": str,
+    "earache_present": str,
+    "tinnitus_present": str,
+    "vertigo_present": str,
+    "hearing_loss_present": str,
+    "hearing_sensitivity_present": str,
+    "sleep_apnea_diagnosed": str,
     "sleep_disorder_type": str,
-    "airway_obstruction_present": bool,
-    "anxiety_present": bool,
-    "depression_present": bool,
-    "stress_present": bool,
+    "airway_obstruction_present": str,
+    "anxiety_present": str,
+    "depression_present": str,
+    "stress_present": str,
     "autoimmune_condition": str,
-    "fibromyalgia_present": bool,
-    "chronic_fatigue_present": bool,
+    "fibromyalgia_present": str,
+    "chronic_fatigue_present": str,
     "current_medications": str,
     "previous_medications": str,
     "adverse_reactions": str,
     "appliance_history": str,
     "current_appliance": str,
-    "cpap_used": bool,
-    "apap_used": bool,
-    "bipap_used": bool,
+    "cpap_used": str,
+    "apap_used": str,
+    "bipap_used": str,
     "physical_therapy_status": str,
     "pain_onset_date": str,
     "pain_duration": str,
@@ -344,7 +417,6 @@ def initialize_key_value_summary():
     }
     
     defaults = {
-        str: "none",
-        bool: False,
+        str: "",
     }
     return {key: defaults[expected_type] for key, expected_type in KEYS_AND_TYPES.items()}

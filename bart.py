@@ -7,6 +7,7 @@ import torch
 import string
 from docx import Document
 from transformers import BartTokenizer, BartForConditionalGeneration
+from utilities import create_chunks_from_paragraphs
 
 def load_model_and_tokenizer():
     model_name_or_path = "facebook/bart-large-cnn"
@@ -133,121 +134,21 @@ def format_prompt(matches):
     prompt = "Summarize this text focusing only on details related to: " + ", ".join(matches) + "."
     return prompt
 
-def split_text_by_paragraphs(text):
-    """
-    Splits text into paragraphs based on likely paragraph boundaries.
-    - Ensures list items stay together within the same paragraph.
-    - Separates sections based on common section header keywords (e.g., "RADIOGRAPHIC EVALUATION").
-    """
-    # Normalize line breaks
-    normalized_text = text.replace('\r\n', '\n').replace('\r', '\n')
 
-    # Define common section headers that should act as paragraph boundaries
-    section_headers = ["CLINICAL EXAMINATION", "RADIOGRAPHIC EVALUATION", "WATERS VIEW", "IMPRESSION"]
-    header_pattern = r'(' + '|'.join(section_headers) + r')\.?'
-
-    # Split based on double newlines, numbered lists, or section headers
-    paragraphs = re.split(r'\n\s*\n|\n(?=\d+\.\s)|\n(?=\-)|\n(?=\*)|' + header_pattern, normalized_text)
-
-    merged_paragraphs = []
-    current_paragraph = ""
-
-    for para in paragraphs:
-        if para is None:
-            continue
-
-        para = para.strip()  # Remove leading and trailing whitespace
-
-        if para in section_headers:
-            # Treat section header as a separate paragraph
-            if current_paragraph:
-                merged_paragraphs.append(current_paragraph.strip())
-            current_paragraph = para  # Start new paragraph with the section header
-        elif re.match(r'^\d+\.\s|^[\-*]\s', para) or (current_paragraph and len(current_paragraph) < 150):
-            # Add list items to the current paragraph
-            current_paragraph += "\n" + para
-        else:
-            # Append current paragraph if it's not empty and reset for the new paragraph
-            if current_paragraph:
-                merged_paragraphs.append(current_paragraph.strip())
-            current_paragraph = para  # Start a new paragraph
-
-    # Add any remaining text as the last paragraph
-    if current_paragraph:
-        merged_paragraphs.append(current_paragraph.strip())
-
-    return merged_paragraphs
-
-def create_chunks_from_paragraphs(text, max_chunk_size=1800):
-    def split_to_sentences(paragraph, max_size):
-        """
-        Splits a paragraph into sentences that fit within the max size.
-        """
-        sentences = re.split(r'(?<=[.!?])\s+', paragraph)  # Split on sentence boundaries
-        chunk = ""
-        chunks = []
-
-        for sentence in sentences:
-            if len(chunk) + len(sentence) + 1 <= max_size:
-                chunk += sentence + " "
-            else:
-                if chunk:
-                    chunks.append(chunk.strip())
-                chunk = sentence + " "
-
-        if chunk:
-            chunks.append(chunk.strip())
-
-        return chunks
-
-    paragraphs = split_text_by_paragraphs(text)
-    chunks = []
-    current_chunk = ""
-
-    for para in paragraphs:
-        # Remove double spaces within paragraphs
-        para = re.sub(r'\s{2,}', ' ', para)
-
-        if len(current_chunk) + len(para) + 1 <= max_chunk_size:
-            current_chunk += para + "\n\n"  # Add paragraph with a newline separator
-        else:
-            # If paragraph exceeds the limit, split it by sentences
-            para_sentences = split_to_sentences(para, max_chunk_size)
-
-            for sentence_chunk in para_sentences:
-                if len(current_chunk) + len(sentence_chunk) + 1 <= max_chunk_size:
-                    current_chunk += sentence_chunk + " "
-                else:
-                    chunks.append(current_chunk.strip())
-                    current_chunk = sentence_chunk + " "
-
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-
-    return chunks
-
-def generate_combined_summary(model, tokenizer, text, criteria_path, patient_id, max_chunk_size=1800):
+def generate_combined_summary(model, tokenizer, text, patient_id, max_chunk_size=3500):
+    # if patient_id == "B001":
+    #         print(text)
     chunks = create_chunks_from_paragraphs(text, max_chunk_size=max_chunk_size)
     
-    path = "/home/lucia/Documents/Alban/data/CLINICAL_NOTES/text_tab_word_2"
+    path = "/home/lucia/Documents/Alban/data/CLINICAL_NOTES/text_tab_word_with_3500_context"
     os.makedirs(path, exist_ok=True)
-
-    
-    # Load criteria and context filters from the file
-    criteria, context_filters = load_criteria(criteria_path)
         
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
     summaries = []
     for chunk in chunks:
-        # Find all occurrences of criteria words or partial words in the chunk
-        matches = find_matching_criteria_with_window(chunk, criteria, context_filters)
-        
-        # Format a prompt based on the found criteria matches
-        crit = format_prompt(matches)
-        
-        with open(os.path.join(path, f"{patient_id}_criteria.txt"), 'a', encoding='utf-8') as output_file:
+        with open(os.path.join(path, f"{patient_id}_Word_text.txt"), 'a', encoding='utf-8') as output_file:
             output_file.write(f"```\n{chunk}\n```\n\n")
         
         # prompt = f"Prompt: {crit}\nText: {chunk}\n"
@@ -274,7 +175,7 @@ def generate_combined_summary(model, tokenizer, text, criteria_path, patient_id,
     final_summary = "\n\n".join(summaries)
     return final_summary
 
-def process_notes(notes_folder, output_folder, criteria_path, model, tokenizer):
+def process_notes(notes_folder, output_folder, model, tokenizer):
     patient_files = {}
     
     for file_name in os.listdir(notes_folder):
@@ -295,26 +196,25 @@ def process_notes(notes_folder, output_folder, criteria_path, model, tokenizer):
             elif file_name.endswith(".docx"):
                 combined_text += extract_text_from_word(file_path)
 
-        summary = generate_combined_summary(model, tokenizer, combined_text, criteria_path, patient_id)
+        summary = generate_combined_summary(model, tokenizer, combined_text, patient_id)
         output_file_path = os.path.join(output_folder, f"{patient_id}_summary.txt")
         
         with open(output_file_path, 'w', encoding='utf-8') as output_file:
             print(f"Saved summary to {output_file_path}")
             output_file.write(f"{summary}\n")
 
-def main(notes_folder, output_folder, criteria_file):
+def main(notes_folder, output_folder):
     model, tokenizer = load_model_and_tokenizer()
 
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
     
-    process_notes(notes_folder, output_folder, criteria_file, model, tokenizer)
+    process_notes(notes_folder, output_folder, model, tokenizer)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Summarize clinical notes using BART based on specific criteria")
     parser.add_argument('--notes_folder', type=str, required=True, help="Path to the folder containing clinical notes")
     parser.add_argument('--output_folder', type=str, required=True, help="Path to the folder to save the summaries")
-    parser.add_argument('--criteria_file', type=str, required=True, help="Path to the text file containing criteria")
     
     args = parser.parse_args()
-    main(args.notes_folder, args.output_folder, args.criteria_file)
+    main(args.notes_folder, args.output_folder)
