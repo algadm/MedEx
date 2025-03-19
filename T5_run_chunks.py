@@ -6,27 +6,14 @@ import fitz
 import torch
 import string
 from docx import Document
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-from utilities import initialize_key_value_summary, create_chunks_from_paragraphs
+from transformers import T5Tokenizer, T5ForConditionalGeneration, GenerationConfig
+from utilities import initialize_key_value_summary
 
 def load_model_and_tokenizer():
-    model_name_or_path = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
-    
-    quantization_config = BitsAndBytesConfig(
-        load_in_8bit=True
-    )
-    
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name_or_path, 
-        trust_remote_code=True,
-        torch_dtype=torch.float16,
-        device_map="auto",
-        quantization_config=quantization_config
-    )
-    
-    return model, tokenizer, torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_name_or_path = "/home/lucia/Documents/Alban/MedSummarizer/finetuned_table_evalT5_2"
+    tokenizer = T5Tokenizer.from_pretrained(model_name_or_path)
+    model = T5ForConditionalGeneration.from_pretrained(model_name_or_path, torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16, device_map="auto")
+    return model, tokenizer
 
 def extract_text_from_pdf(pdf_path):
     doc = fitz.open(pdf_path)
@@ -40,15 +27,6 @@ def extract_text_from_word(docx_path):
     return "\n".join([clean_text(paragraph.text) for paragraph in doc.paragraphs])
 
 def clean_text(text):
-    """
-    Cleans the text by replacing specific characters with their desired replacements.
-    
-    Args:
-        text (str): The input text to clean.
-    
-    Returns:
-        str: The cleaned text.
-    """
     replacements = {
         "’": "'",
         "–": "-"
@@ -57,49 +35,60 @@ def clean_text(text):
         text = text.replace(old, new)
     return text
 
-def generate_text(model, tokenizer, device, prompt, max_length=300):
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=2048,
-        return_attention_mask=True
-    ).to(device)
-    
-    with torch.no_grad():
-        output = model.generate(
-            inputs["input_ids"],
-            attention_mask=inputs["attention_mask"],
-            max_new_tokens=512,
-            pad_token_id=tokenizer.pad_token_id,
-            temperature=0.7,
-            top_p=0.9,
-            do_sample=True
-        )
+def create_chunks_from_paragraphs(text, max_chunk_size=1500):
+    paragraphs = text.split("\n\n")
+    chunks = []
+    current_chunk = ""
 
-    return tokenizer.decode(output[0], skip_special_tokens=True)
+    for para in paragraphs:
+        para = re.sub(r'\s{2,}', ' ', para)
 
-def generate_combined_summary(model, tokenizer, device, text, max_chunk_size=12000, max_length=300):
-    """
-    Generates a summary using DeepSeek.
-    """
+        if len(current_chunk) + len(para) + 1 <= max_chunk_size:
+            current_chunk += para + "\n\n"
+        else:
+            chunks.append(current_chunk.strip())
+            current_chunk = para + "\n\n"
+
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+
+    return chunks
+
+def generate_combined_summary(model, tokenizer, text, max_chunk_size=3500, model_max_tokens=512):
     chunks = create_chunks_from_paragraphs(text, max_chunk_size=max_chunk_size)
-    dict = initialize_key_value_summary()
-    keys = list(dict.keys())
+        
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
     
     summaries = []
+    
+    generation_config = GenerationConfig(
+        max_new_tokens=300,
+        min_length=50,
+        length_penalty=1.0,
+        num_beams=4,
+        do_sample=True,
+        temperature=0.9,
+        top_k=40,
+        top_p=0.9,
+    )
+    
     for chunk in chunks:
-        summary = generate_text(model, tokenizer, device, chunk, max_length=max_length)
+        inputs = tokenizer(chunk, return_tensors="pt", truncation=True, max_length=model_max_tokens, padding="max_length").to(device)
+        
+        summary_ids = model.generate(
+            inputs["input_ids"], 
+            generation_config=generation_config
+        )
+        summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
         summaries.append(summary)
         
-
-    final_summary = "\n\n".join(summaries)
+    final_summary = "\n----------------------------------------------------------------------------------------------------\n".join(summaries)
     return final_summary
 
-def process_notes(notes_folder, output_folder, device, model, tokenizer):
+def process_notes(notes_folder, output_folder, model, tokenizer):
     patient_files = {}
-    
+
     for file_name in os.listdir(notes_folder):
         if not (file_name.endswith(".pdf") or file_name.endswith(".docx")):
             continue
@@ -118,7 +107,7 @@ def process_notes(notes_folder, output_folder, device, model, tokenizer):
             elif file_name.endswith(".docx"):
                 combined_text += extract_text_from_word(file_path)
 
-        summary = generate_combined_summary(model, tokenizer, device, combined_text)
+        summary = generate_combined_summary(model, tokenizer, combined_text)
         output_file_path = os.path.join(output_folder, f"{patient_id}_summary.txt")
         
         with open(output_file_path, 'w', encoding='utf-8') as output_file:
@@ -126,15 +115,15 @@ def process_notes(notes_folder, output_folder, device, model, tokenizer):
             output_file.write(f"{summary}\n")
 
 def main(notes_folder, output_folder):
-    model, tokenizer, device = load_model_and_tokenizer()
+    model, tokenizer = load_model_and_tokenizer()
 
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
     
-    process_notes(notes_folder, output_folder, device, model, tokenizer)
+    process_notes(notes_folder, output_folder, model, tokenizer)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Summarize clinical notes using DeepSeek")
+    parser = argparse.ArgumentParser(description="Summarize clinical notes using FLAN-T5 based on specific criteria")
     parser.add_argument('--notes_folder', type=str, required=True, help="Path to the folder containing clinical notes")
     parser.add_argument('--output_folder', type=str, required=True, help="Path to the folder to save the summaries")
     

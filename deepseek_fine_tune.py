@@ -2,6 +2,7 @@ import os
 import re
 import csv
 import fitz
+import torch
 import argparse
 import evaluate
 import numpy as np
@@ -10,7 +11,8 @@ from docx import Document
 from datasets import load_dataset
 from sklearn.model_selection import train_test_split
 from utilities import initialize_key_value_summary
-from transformers import BartForConditionalGeneration, BartTokenizer, Trainer, TrainingArguments, DataCollatorForSeq2Seq, EarlyStoppingCallback
+from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
+from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments, DataCollatorForSeq2Seq, EarlyStoppingCallback, BitsAndBytesConfig
 
 from utilities import extract_text_from_pdf, extract_text_from_word, create_chunks_from_paragraphs
 
@@ -65,14 +67,14 @@ def clean_text(text):
         text = text.replace(old, new)
     return text
 
-def save_notes_and_summaries_to_csv(notes_folder, summaries_folder, output_csv, max_chunk_size=3500):
+def save_notes_and_summaries_to_csv(notes_folder, summaries_folder, output_csv, max_chunk_size=12000):
     """Save clinical notes and summaries to a CSV file.
 
     Args:
         notes_folder (str): Path to the folder containing clinical notes.
         summaries_folder (str): Path to the folder containing the summaries.
         output_csv (str): Path to save the output CSV file.
-        max_chunk_size (int, optional): Maximum number of characters used for each chunk. Defaults to 3500.
+        max_chunk_size (int, optional): Maximum number of characters used for each chunk. Defaults to 12000.
     """
     texts, summaries = [], []
     
@@ -174,13 +176,43 @@ def split_data_by_patient(input_csv, output_dir):
 def fine_tune(training_path, validation_path, output_dir):
     dataset = load_dataset("csv", data_files={"train": training_path, "validation": validation_path})
 
-    model_name = "facebook/bart-large-cnn"
-    model = BartForConditionalGeneration.from_pretrained(model_name)
-    tokenizer = BartTokenizer.from_pretrained(model_name)
+    model_name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,  # Computation in float16
+        bnb_4bit_use_double_quant=True,  # Double quantization for better efficiency
+        bnb_4bit_quant_type="nf4"  # NormalFloat4 (NF4) quantization
+    )
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        quantization_config=quantization_config,
+        device_map="auto"
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    model = prepare_model_for_kbit_training(model)
+
+    lora_config = LoraConfig(
+        r=16,  # Rank of LoRA layers
+        lora_alpha=32,  # Scaling factor
+        target_modules=["q_proj", "v_proj"],  # Apply LoRA to attention layers
+        lora_dropout=0.05,
+        bias="none",
+        task_type=TaskType.CAUSAL_LM,  # Task type: causal language modeling
+    )
+
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()  # Check trainable parameters
 
     def preprocess_function(examples):
-        model_inputs = tokenizer(examples["text"], max_length=1024, truncation=True, padding="max_length")
-        labels = tokenizer(examples["summary"], max_length=150, truncation=True, padding="max_length").input_ids
+        inputs = [f"Summarize: {text}" for text in examples["text"]]
+        model_inputs = tokenizer(inputs, max_length=1024, truncation=True, padding="max_length")
+
+        labels = tokenizer(text_target=examples["summary"], max_length=1024, truncation=True, padding="max_length").input_ids
+
         model_inputs["labels"] = labels
         return model_inputs
 
@@ -190,31 +222,32 @@ def fine_tune(training_path, validation_path, output_dir):
 
     training_args = TrainingArguments(
         output_dir=output_dir,
-        eval_strategy="epoch",
+        evaluation_strategy="epoch",
         save_strategy="epoch",
         learning_rate=1e-5,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
         weight_decay=0.01,
         save_total_limit=3,
         num_train_epochs=20,
-        fp16=True,
+        gradient_checkpointing=True,
         load_best_model_at_end=True,
         metric_for_best_model="eval_rouge1",
         greater_is_better=True,
+        fp16=False,  # Disable full 16-bit
+        bf16=False,  # Disable bfloat16
     )
 
     def compute_metrics(eval_preds):
         metric = evaluate.load("rouge")
         logits, labels = eval_preds
-        
-        # Ensure logits is a single array in case it's a tuple
+
         if isinstance(logits, tuple):
             logits = logits[0]
-            
+
         predictions = np.argmax(logits, axis=-1)
         decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
-        
+
         labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
         decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
@@ -223,7 +256,7 @@ def fine_tune(training_path, validation_path, output_dir):
         return result
 
     early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=3)
-    
+
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -239,7 +272,6 @@ def fine_tune(training_path, validation_path, output_dir):
     results = trainer.evaluate()
     print(results)
 
-    model.config.forced_bos_token_id = 0 
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
     print(f"Model saved to {output_dir}")
@@ -258,7 +290,7 @@ if __name__ == "__main__":
     
     if args.prepare_data:
         output_csv = os.path.join(args.output_dir, "clinical_data.csv")
-        save_notes_and_summaries_to_csv(args.input_dir, args.summaries_dir, output_csv)
+        data = save_notes_and_summaries_to_csv(args.input_dir, args.summaries_dir, output_csv)
         split_data_by_patient(output_csv, args.output_dir)
     else:
         if args.train_csv and args.val_csv:

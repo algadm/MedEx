@@ -10,7 +10,7 @@ from docx import Document
 from datasets import load_dataset
 from sklearn.model_selection import train_test_split
 from utilities import initialize_key_value_summary
-from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments, DataCollatorForSeq2Seq, EarlyStoppingCallback
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments, DataCollatorForLanguageModeling, EarlyStoppingCallback
 
 from utilities import extract_text_from_pdf, extract_text_from_word, create_chunks_from_paragraphs
 
@@ -65,7 +65,7 @@ def clean_text(text):
         text = text.replace(old, new)
     return text
 
-def save_notes_and_summaries_to_csv(notes_folder, summaries_folder, output_csv, max_chunk_size=12000):
+def save_notes_and_summaries_to_csv(notes_folder, summaries_folder, output_csv, max_chunk_size=3500):
     """Save clinical notes and summaries to a CSV file.
 
     Args:
@@ -80,8 +80,7 @@ def save_notes_and_summaries_to_csv(notes_folder, summaries_folder, output_csv, 
         if note_filename.endswith((".txt", ".pdf", ".docx")):
             patient_id = note_filename.split("_")[0]
             summary_filename = f"{patient_id}_summary.txt"
-            note_path = os.path.join(notes_folder, note_filename)
-            summary_path = os.path.join(summaries_folder, summary_filename)
+            note_path, summary_path = os.path.join(notes_folder, note_filename), os.path.join(summaries_folder, summary_filename)
             
             if os.path.exists(note_path) and os.path.exists(summary_path):
                 dict = initialize_key_value_summary()
@@ -103,7 +102,6 @@ def save_notes_and_summaries_to_csv(notes_folder, summaries_folder, output_csv, 
     data = pd.DataFrame({"text": texts, "summary": summaries})
     data.to_csv(output_csv, index=False, quoting=csv.QUOTE_ALL)
     print(f"Data saved to {output_csv}")
-    return data
 
 def split_summary_text(summary_text):
     """Splits the summary text by a long '-' delimiter, indicating different chunk summaries.
@@ -176,54 +174,69 @@ def split_data_by_patient(input_csv, output_dir):
 def fine_tune(training_path, validation_path, output_dir):
     dataset = load_dataset("csv", data_files={"train": training_path, "validation": validation_path})
 
-    model_name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-    model = AutoModelForCausalLM.from_pretrained(model_name)
+    model_name = "PanaceaAI/BiomedGPT-Base-Pretrained"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    
-    model.gradient_checkpointing_enable()
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, 
+        torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16, 
+        device_map="auto"
+    )
 
     def preprocess_function(examples):
-        inputs = [f"Summarize: {text}" for text in examples["text"]]
-        model_inputs = tokenizer(inputs, max_length=512, truncation=True, padding="max_length")
-
-        with tokenizer.as_target_tokenizer():
-            labels = tokenizer(examples["summary"], max_length=128, truncation=True, padding="max_length").input_ids
+        inputs = []
+        targets = []
         
+        for text, summary in zip(examples["text"], examples["summary"]):
+            # GPT-style training: format input as instruction + text
+            formatted_input = f"""Summarize the following clinical text:\n\n{text}\n\nSummary:"""
+            inputs.append(formatted_input)
+            targets.append(summary)
+        
+        model_inputs = tokenizer(
+            inputs, max_length=1024, truncation=True, padding="max_length"
+        )
+        labels = tokenizer(
+            targets, max_length=300, truncation=True, padding="max_length"
+        )["input_ids"]
+
         model_inputs["labels"] = labels
         return model_inputs
 
     tokenized_datasets = dataset.map(preprocess_function, batched=True)
 
-    data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False  # GPT-based models use causal LM, not masked LM
+    )
 
     training_args = TrainingArguments(
         output_dir=output_dir,
         evaluation_strategy="epoch",
         save_strategy="epoch",
         learning_rate=1e-5,
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
+        per_device_train_batch_size=2,  # Reduce if OOM
+        per_device_eval_batch_size=2,
+        gradient_accumulation_steps=8,  # Simulate batch size of 16
         weight_decay=0.01,
         save_total_limit=3,
-        num_train_epochs=20,
-        bf16=True,
+        num_train_epochs=10,
         fp16=False,
-        gradient_checkpointing=True,
+        bf16=True,
         load_best_model_at_end=True,
-        metric_for_best_model="eval_rouge1",
-        greater_is_better=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
     )
 
     def compute_metrics(eval_preds):
         metric = evaluate.load("rouge")
         logits, labels = eval_preds
-        
+
         if isinstance(logits, tuple):
             logits = logits[0]
-            
+
         predictions = np.argmax(logits, axis=-1)
         decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
-        
+
         labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
         decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
@@ -232,7 +245,7 @@ def fine_tune(training_path, validation_path, output_dir):
         return result
 
     early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=3)
-    
+
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -266,7 +279,7 @@ if __name__ == "__main__":
     
     if args.prepare_data:
         output_csv = os.path.join(args.output_dir, "clinical_data.csv")
-        data = save_notes_and_summaries_to_csv(args.input_dir, args.summaries_dir, output_csv)
+        save_notes_and_summaries_to_csv(args.input_dir, args.summaries_dir, output_csv)
         split_data_by_patient(output_csv, args.output_dir)
     else:
         if args.train_csv and args.val_csv:

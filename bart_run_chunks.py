@@ -10,7 +10,7 @@ from transformers import BartTokenizer, BartForConditionalGeneration, Generation
 from utilities import initialize_key_value_summary
 
 def load_model_and_tokenizer():
-    model_name_or_path = "/home/lucia/Documents/Alban/MedSummarizer/fine_tuned_model_table_eval_all_here_2"
+    model_name_or_path = "/home/lucia/Documents/Alban/MedSummarizer/finetuned_models/finetuned_table_evalBart"
     tokenizer = BartTokenizer.from_pretrained(model_name_or_path)
     model = BartForConditionalGeneration.from_pretrained(model_name_or_path)
     return model, tokenizer
@@ -210,8 +210,8 @@ def generate_combined_summary(model, tokenizer, text, max_chunk_size=3500, model
     summaries = []
     
     generation_config = GenerationConfig(
-        max_length=800,
-        min_length=100,
+        max_length=1024,
+        min_length=3,
         length_penalty=1.0,
         num_beams=8,
         do_sample=True,
@@ -221,7 +221,7 @@ def generate_combined_summary(model, tokenizer, text, max_chunk_size=3500, model
     )
     
     for chunk in chunks:
-        # print(f"Generating summary for chunk: {chunk}")
+        prompt = f'Using this list: {keys}, summarize this note: {chunk}'
         inputs = tokenizer(chunk, return_tensors="pt").to(device)
         # , truncation=True, max_length=model_max_tokens
         
