@@ -20,7 +20,7 @@ def read_summaries(summary_folder: str) -> dict:
     """
     summaries = {}
     for file_name in os.listdir(summary_folder):
-        if file_name.endswith("_summary.txt"):
+        if file_name.lower().endswith("_summary.txt"):
             patient_id = file_name.split("_")[0]
             with open(os.path.join(summary_folder, file_name), "r", encoding="utf-8") as file:
                 summaries[patient_id] = file.read()
@@ -249,21 +249,40 @@ def generate_dashboard(df: pd.DataFrame) -> None:
     ax_migraine = fig.add_subplot(gs_top_left[0, 3])  # Migraine subplot position
 
     # Create the pie chart
-    migraine_data = [no_migraine_headache_pct, headache_only_pct, migraine_only_pct, migraine_and_headache_pct]
-    migraine_labels = ['No Migraine/Headache', 'Headache', 'Migraine', 'Migraine & Headache']
-    migraine_colors = ['#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3']  # Distinct colors
+    migraine_data = [no_migraine_headache_pct, migraine_only_pct, headache_only_pct, migraine_and_headache_pct]
+    migraine_labels = ['No Migraine/Headache', 'Migraine', 'Headache', 'Migraine & Headache']
+    migraine_colors = ['#66c2a5', '#8da0cb', '#fc8d62', '#e78ac3']  # Distinct colors
     
     
+    def autopct_format(pct):
+        return f'{pct:.1f}%' if pct >= 5 else ''
+
     wedges, texts, autotexts = ax_migraine.pie(
         migraine_data,
         labels=None,  # Remove default labels
-        autopct='%1.1f%%',
+        autopct=autopct_format,  # Custom autopct function
         colors=migraine_colors,
         startangle=90,
         wedgeprops={'width': 1, 'edgecolor': 'white', 'linewidth': 1},
         textprops={'fontsize': 10}
     )
 
+    # Add leader lines for small slices
+    for i, (wedge, autotext) in enumerate(zip(wedges, autotexts)):
+        if migraine_data[i] < 5:  # Adjust threshold as needed
+            angle = (wedge.theta2 - wedge.theta1) / 2. + wedge.theta1
+            x = 1.2 * np.cos(np.deg2rad(angle))
+            y = 1.2 * np.sin(np.deg2rad(angle))
+            ax_migraine.annotate(
+                f'{migraine_data[i]:.1f}%',
+                xy=(np.cos(np.deg2rad(angle)), np.sin(np.deg2rad(angle))),
+                xytext=(x, y),
+                arrowprops=dict(arrowstyle="-", color='black'),
+                fontsize=10,
+                ha='center',
+                va='center'
+            )
+            
     # Update the title
     ax_migraine.set_title('Migraine & Headache', fontsize=16, pad=15, fontweight='semibold')
 

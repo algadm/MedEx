@@ -10,7 +10,7 @@ from transformers import BartTokenizer, BartForConditionalGeneration, Generation
 from utilities import initialize_key_value_summary
 
 def load_model_and_tokenizer():
-    model_name_or_path = "/home/lucia/Documents/Alban/MedSummarizer/finetuned_models/finetuned_table_evalBart"
+    model_name_or_path = "/home/lucia/Documents/Alban/MedSummarizer/finetuned_models/finetuned_table_evalBart_19_March_2/fold_5/model"
     tokenizer = BartTokenizer.from_pretrained(model_name_or_path)
     model = BartForConditionalGeneration.from_pretrained(model_name_or_path)
     return model, tokenizer

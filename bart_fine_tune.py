@@ -94,38 +94,47 @@ def assign_patient_ids(data):
     return data
 
 def prepare_folds(input_csv, output_dir, n_splits=5):
-    """Prepares the data into folds for cross-validation."""
-    data = pd.read_csv(input_csv)
-    data = assign_patient_ids(data)
-    data = data.dropna(subset=["patient_id"])
-    unique_patients = data["patient_id"].unique()
-
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    """Prepares multiple train-validation-test splits for cross-validation while keeping the 80%-10%-10% ratio."""
     
-    for fold, (train_val_idx, test_idx) in enumerate(kf.split(unique_patients)):
+    data = pd.read_csv(input_csv)
+    data = assign_patient_ids(data)  # Ensure patient IDs are assigned correctly
+    data = data.dropna(subset=["patient_id"])
+    
+    unique_patients = np.array(data["patient_id"].unique())
+
+    for fold in range(n_splits):
         print(f"Preparing fold {fold + 1}/{n_splits}")
-        
-        train_val_patients = unique_patients[train_val_idx]
-        test_patients = unique_patients[test_idx]
-        
-        train_patients, val_patients = train_test_split(train_val_patients, train_size=0.8889, random_state=42)  # 80% train, 10% val
-        
+
+        # Step 1: Shuffle the unique patient IDs
+        np.random.seed(fold)  # Ensures different but reproducible splits per fold
+        np.random.shuffle(unique_patients)
+
+        # Step 2: Split patients into 80%-10%-10%
+        train_patients, temp_patients = train_test_split(unique_patients, train_size=0.80, random_state=fold)
+        val_patients, test_patients = train_test_split(temp_patients, train_size=0.50, random_state=fold)
+
+        # Step 3: Extract corresponding data
         train_data = data[data["patient_id"].isin(train_patients)]
         val_data = data[data["patient_id"].isin(val_patients)]
         test_data = data[data["patient_id"].isin(test_patients)]
-        
+
+        # Remove patient ID before saving
         train_data = train_data.drop(columns=["patient_id"])
         val_data = val_data.drop(columns=["patient_id"])
         test_data = test_data.drop(columns=["patient_id"])
 
+        # Create fold directory
         fold_dir = os.path.join(output_dir, f"fold_{fold + 1}")
         os.makedirs(fold_dir, exist_ok=True)
-        
+
+        # Save train, validation, and test CSVs for this fold
         train_data.to_csv(os.path.join(fold_dir, "train.csv"), index=False, quoting=csv.QUOTE_ALL)
         val_data.to_csv(os.path.join(fold_dir, "validation.csv"), index=False, quoting=csv.QUOTE_ALL)
         test_data.to_csv(os.path.join(fold_dir, "test.csv"), index=False, quoting=csv.QUOTE_ALL)
-    
-    print(f"Folds prepared and saved in {output_dir}")
+
+        print(f"Fold {fold + 1} created: Train={len(train_data)}, Validation={len(val_data)}, Test={len(test_data)}")
+
+    print(f"Cross-validation folds prepared and saved in {output_dir}")
 
 def fine_tune(training_path, validation_path, output_dir):
     """Fine-tunes the BART model on the given training and validation datasets."""
@@ -156,7 +165,7 @@ def fine_tune(training_path, validation_path, output_dir):
         per_device_train_batch_size=8,
         per_device_eval_batch_size=8,
         weight_decay=0.01,
-        save_total_limit=20,
+        save_total_limit=3,
         num_train_epochs=20,
         fp16=True,
         load_best_model_at_end=True,
@@ -181,7 +190,7 @@ def fine_tune(training_path, validation_path, output_dir):
         result = {key: value * 100 for key, value in result.items()}
         return result
 
-    early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=3)
+    early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=20)
     
     trainer = Trainer(
         model=model,
