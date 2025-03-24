@@ -10,7 +10,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from utilities import initialize_key_value_summary, create_chunks_from_paragraphs
 
 def load_model_and_tokenizer():
-    model_name_or_path = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+    model_name_or_path = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
     
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
     
@@ -90,7 +90,8 @@ def generate_combined_summary(model, tokenizer, device, text, max_chunk_size=120
     
     summaries = []
     for chunk in chunks:
-        summary = generate_text(model, tokenizer, device, chunk, max_length=max_length)
+        prompt = f"Each patient has the following dicionnary: {dict}. For each of the keys, summarize the following text: {chunk}"
+        summary = generate_text(model, tokenizer, device, prompt, max_length=max_length)
         summaries.append(summary)
         
 

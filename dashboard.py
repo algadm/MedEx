@@ -187,8 +187,8 @@ def generate_dashboard(df: pd.DataFrame) -> None:
     ax_age = fig.add_subplot(gs_top_left[0, 0])
     colors = ['#66c2a5', '#fc8d62', '#8da0cb']
     ax_age.pie(age_dist, labels=age_dist.index, autopct='%1.1f%%',
-              colors=colors, startangle=90, textprops={'fontsize': 10},
-              wedgeprops={'linewidth': 1, 'edgecolor': 'white'})
+            colors=colors, startangle=90, textprops={'fontsize': 10},
+            wedgeprops={'linewidth': 1, 'edgecolor': 'white'})
     ax_age.set_title('Age Distribution', fontsize=16, pad=15, fontweight='semibold')
 
     # Column 2: Sleep Disorder Prevalence

@@ -7,10 +7,10 @@ import torch
 import string
 from docx import Document
 from transformers import BartTokenizer, BartForConditionalGeneration, GenerationConfig
-from utilities import initialize_key_value_summary
+from utilities import initialize_key_value_summary, create_chunks_from_paragraphs
 
 def load_model_and_tokenizer():
-    model_name_or_path = "/home/lucia/Documents/Alban/MedSummarizer/finetuned_models/finetuned_table_evalBart_19_March_2/fold_5/model"
+    model_name_or_path = "/path/to/your/model"
     tokenizer = BartTokenizer.from_pretrained(model_name_or_path)
     model = BartForConditionalGeneration.from_pretrained(model_name_or_path)
     return model, tokenizer
@@ -179,26 +179,6 @@ def split_text_by_paragraphs(text):
 
     return merged_paragraphs
 
-def create_chunks_from_paragraphs(text, max_chunk_size=1500):
-    paragraphs = split_text_by_paragraphs(text)
-    chunks = []
-    current_chunk = ""
-
-    for para in paragraphs:
-        # Remove double spaces within paragraphs
-        para = re.sub(r'\s{2,}', ' ', para)
-
-        if len(current_chunk) + len(para) + 1 <= max_chunk_size:
-            current_chunk += para + "\n\n"  # Add paragraph with a newline separator
-        else:
-            chunks.append(current_chunk.strip())
-            current_chunk = para + "\n\n"  # Start the new chunk
-
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-    
-    return chunks
-
 def generate_combined_summary(model, tokenizer, text, max_chunk_size=3500, model_max_tokens=1024):
     chunks = create_chunks_from_paragraphs(text, max_chunk_size=max_chunk_size)
         
@@ -210,7 +190,7 @@ def generate_combined_summary(model, tokenizer, text, max_chunk_size=3500, model
     summaries = []
     
     generation_config = GenerationConfig(
-        max_length=1024,
+        max_length=model_max_tokens,
         min_length=3,
         length_penalty=1.0,
         num_beams=8,

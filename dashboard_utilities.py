@@ -184,7 +184,7 @@ def extract_months_from_pain_onset(pain_onset_str):
     Convert pain_onset_date strings (e.g., "3 years ago", "1 year and 9 months ago") into total months.
     """
     if pd.isna(pain_onset_str) or pain_onset_str == "":
-        return np.nan
+        return 0
     
     # Extract years and months using regex
     years_match = re.search(r'(\d+)\s*year', pain_onset_str)
@@ -211,6 +211,7 @@ def set_pain_onset_data(df):
 
     # Group by age bin and calculate mean and SD of pain onset duration (in years)
     pain_onset_stats = df.groupby('age_bin', observed=False)['pain_onset_months'].agg(['mean', 'std']).reset_index()
+    pain_onset_stats = pain_onset_stats.dropna(subset=['mean', 'std'])
     pain_onset_stats['mean'] /= 12  # Convert mean to years
     pain_onset_stats['std'] /= 12  # Convert SD to years
 
