@@ -1,6 +1,7 @@
 import os
 import re
 import csv
+import json
 import fitz
 import torch
 import argparse
@@ -188,7 +189,8 @@ def fine_tune(training_path, validation_path, output_dir):
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         quantization_config=quantization_config,
-        device_map="auto"
+        device_map="auto",
+        attn_implementation="flash_attention_2",
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -209,9 +211,9 @@ def fine_tune(training_path, validation_path, output_dir):
 
     def preprocess_function(examples):
         inputs = [f"Summarize: {text}" for text in examples["text"]]
-        model_inputs = tokenizer(inputs, max_length=1024, truncation=True, padding="max_length")
+        model_inputs = tokenizer(inputs, max_length=3000, truncation=True, padding="max_length")
 
-        labels = tokenizer(text_target=examples["summary"], max_length=1024, truncation=True, padding="max_length").input_ids
+        labels = tokenizer(text_target=examples["summary"], max_length=100, truncation=True, padding="max_length").input_ids
 
         model_inputs["labels"] = labels
         return model_inputs
@@ -223,19 +225,23 @@ def fine_tune(training_path, validation_path, output_dir):
     training_args = TrainingArguments(
         output_dir=output_dir,
         evaluation_strategy="epoch",
-        save_strategy="epoch",
+        save_strategy="steps",
+        save_steps=500,
+        save_total_limit=3,
         learning_rate=1e-5,
+        lr_scheduler_type="cosine",
+        warmup_steps=100,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         weight_decay=0.01,
-        save_total_limit=3,
-        num_train_epochs=20,
+        num_train_epochs=3,
+        gradient_accumulation_steps=4,
         gradient_checkpointing=True,
         load_best_model_at_end=True,
         metric_for_best_model="eval_rouge1",
         greater_is_better=True,
-        fp16=False,  # Disable full 16-bit
-        bf16=False,  # Disable bfloat16
+        fp16=True,
+        bf16=False,
     )
 
     def compute_metrics(eval_preds):
@@ -255,7 +261,7 @@ def fine_tune(training_path, validation_path, output_dir):
         result = {key: value * 100 for key, value in result.items()}
         return result
 
-    early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=3)
+    early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=2)
 
     trainer = Trainer(
         model=model,
@@ -268,13 +274,16 @@ def fine_tune(training_path, validation_path, output_dir):
         callbacks=[early_stopping_callback],
     )
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=True)
     results = trainer.evaluate()
     print(results)
 
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
     print(f"Model saved to {output_dir}")
+    
+    with open(os.path.join(output_dir, "final_eval_results.json"), "w") as f:
+        json.dump(results, f, indent=4)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare data or fine-tune model for summarization.")
