@@ -281,6 +281,8 @@ if __name__ == "__main__":
     parser.add_argument("--input_dir", type=str, required=True, help="Directory with clinical notes with prompts in .txt format.")
     parser.add_argument("--summaries_dir", type=str, required=True, help="Directory with summaries in .txt format.")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save the output model or CSV.")
+    parser.add_argument("--train_csv", type=str, help="Path to training CSV.")
+    parser.add_argument("--val_csv", type=str, help="Path to validation CSV.")
     parser.add_argument("--CSV_folder", type=str, help="Folder containing pre-split CSV files for cross-validation.")
     parser.add_argument("--cross_validate", action="store_true", help="If set, performs 5-fold cross-validation.")
     

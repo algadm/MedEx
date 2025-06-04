@@ -10,11 +10,10 @@ import numpy as np
 import pandas as pd
 from docx import Document
 from datasets import load_dataset
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, KFold
 from utilities import initialize_key_value_summary
 from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
 from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments, DataCollatorForSeq2Seq, EarlyStoppingCallback, BitsAndBytesConfig
-
 from utilities import extract_text_from_pdf, extract_text_from_word, create_chunks_from_paragraphs
 
 def clean_summary(summary):
@@ -77,17 +76,15 @@ def save_notes_and_summaries_to_csv(notes_folder, summaries_folder, output_csv, 
         output_csv (str): Path to save the output CSV file.
         max_chunk_size (int, optional): Maximum number of characters used for each chunk. Defaults to 12000.
     """
-    texts, summaries = [], []
-    
+    texts, summaries = []
     for note_filename in os.listdir(notes_folder):
         if note_filename.endswith((".txt", ".pdf", ".docx")):
             patient_id = note_filename.split("_")[0]
             summary_filename = f"{patient_id}_summary.txt"
-            note_path, summary_path = os.path.join(notes_folder, note_filename), os.path.join(summaries_folder, summary_filename)
-            
+            note_path = os.path.join(notes_folder, note_filename)
+            summary_path = os.path.join(summaries_folder, summary_filename)
             if os.path.exists(note_path) and os.path.exists(summary_path):
-                dict = initialize_key_value_summary()
-                keys = list(dict.keys())
+                keys = list(initialize_key_value_summary().keys())
                 
                 text = load_text(note_path)
                 summary = load_text(summary_path)
@@ -131,8 +128,7 @@ def assign_patient_ids(data):
     
     for index, row in data.iterrows():
         # Extract patient_id from the 'summary' column using regex
-        extracted_id = pd.Series(row['summary']).str.extract(r'patient_id: (\w+)')[0].values[0]
-        
+        extracted_id = pd.Series(row['summary']).str.extract(r'patient_id: (\\w+)')[0].values[0]
         if pd.notna(extracted_id):
             current_patient_id = extracted_id
         
@@ -141,7 +137,7 @@ def assign_patient_ids(data):
     data["patient_id"] = patient_ids
     return data
 
-def split_data_by_patient(input_csv, output_dir):
+def prepare_folds(input_csv, output_dir, n_splits=5):
     """Splits the data into training, validation, and test sets based on unique patient IDs.
 
     Args:
@@ -154,25 +150,25 @@ def split_data_by_patient(input_csv, output_dir):
     data = pd.read_csv(input_csv)
     data = assign_patient_ids(data)
     data = data.dropna(subset=["patient_id"])
-    unique_patients = data["patient_id"].unique()
-
-    train_patients, temp_patients = train_test_split(unique_patients, train_size=0.8, random_state=42)
-    val_patients, test_patients = train_test_split(temp_patients, test_size=0.5, random_state=42)
-
-    train_data = data[data["patient_id"].isin(train_patients)]
-    val_data = data[data["patient_id"].isin(val_patients)]
-    test_data = data[data["patient_id"].isin(test_patients)]
-    
-    train_data = train_data.drop(columns=["patient_id"])
-    val_data = val_data.drop(columns=["patient_id"])
-    test_data = test_data.drop(columns=["patient_id"])
-
-    train_data.to_csv(os.path.join(output_dir, "train.csv"), index=False, quoting=csv.QUOTE_ALL)
-    val_data.to_csv(os.path.join(output_dir, "validation.csv"), index=False, quoting=csv.QUOTE_ALL)
-    test_data.to_csv(os.path.join(output_dir, "test.csv"), index=False, quoting=csv.QUOTE_ALL)
-
-    print("Data split by patient and saved.")
-    return train_data, val_data, test_data
+    unique_patients = np.array(data["patient_id"].unique())
+    for fold in range(n_splits):
+        print(f"Preparing fold {fold + 1}/{n_splits}")
+        np.random.seed(fold)
+        np.random.shuffle(unique_patients)
+        train_patients, temp_patients = train_test_split(unique_patients, train_size=0.80, random_state=fold)
+        val_patients, test_patients = train_test_split(temp_patients, train_size=0.50, random_state=fold)
+        train_data = data[data["patient_id"].isin(train_patients)]
+        val_data = data[data["patient_id"].isin(val_patients)]
+        test_data = data[data["patient_id"].isin(test_patients)]
+        train_data = train_data.drop(columns=["patient_id"])
+        val_data = val_data.drop(columns=["patient_id"])
+        test_data = test_data.drop(columns=["patient_id"])
+        fold_dir = os.path.join(output_dir, f"fold_{fold + 1}")
+        os.makedirs(fold_dir, exist_ok=True)
+        train_data.to_csv(os.path.join(fold_dir, "train.csv"), index=False, quoting=csv.QUOTE_ALL)
+        val_data.to_csv(os.path.join(fold_dir, "validation.csv"), index=False, quoting=csv.QUOTE_ALL)
+        test_data.to_csv(os.path.join(fold_dir, "test.csv"), index=False, quoting=csv.QUOTE_ALL)
+        print(f"Fold {fold + 1} created: Train={len(train_data)}, Validation={len(val_data)}, Test={len(test_data)}")
 
 def fine_tune(training_path, validation_path, output_dir):
     dataset = load_dataset("csv", data_files={"train": training_path, "validation": validation_path})
@@ -258,8 +254,7 @@ def fine_tune(training_path, validation_path, output_dir):
         decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
         result = metric.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
-        result = {key: value * 100 for key, value in result.items()}
-        return result
+        return {key: value * 100 for key, value in result.items()}
 
     early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=2)
 
@@ -284,23 +279,37 @@ def fine_tune(training_path, validation_path, output_dir):
     
     with open(os.path.join(output_dir, "final_eval_results.json"), "w") as f:
         json.dump(results, f, indent=4)
+    print(f"Model saved to {output_dir}")
+
+def cross_validate(csv_folder, output_dir, n_splits=5):
+    for fold in range(n_splits):
+        print(f"Processing fold {fold + 1}/{n_splits}")
+        train_csv = os.path.join(csv_folder, f"fold_{fold + 1}", "train.csv")
+        val_csv = os.path.join(csv_folder, f"fold_{fold + 1}", "validation.csv")
+        model_dir = os.path.join(output_dir, f"fold_{fold + 1}", "model")
+        os.makedirs(model_dir, exist_ok=True)
+        fine_tune(train_csv, val_csv, model_dir)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare data or fine-tune model for summarization.")
-    parser.add_argument("--prepare_data", action="store_true", help="If set, prepares the data by saving clinical notes to CSV.")
-    parser.add_argument("--input_dir", type=str, required=True, help="Directory with clinical notes with prompts in .txt format.")
-    parser.add_argument("--summaries_dir", type=str, required=True, help="Directory with summaries in .txt format.")
-    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save the output model or CSV.")
-    parser.add_argument("--train_csv", type=str, help="Path to the training CSV for fine-tuning.")
-    parser.add_argument("--val_csv", type=str, help="Path to the validation CSV for fine-tuning.")
-    
+    parser.add_argument("--prepare_data", action="store_true", help="Prepare the CSVs from input folders.")
+    parser.add_argument("--input_dir", type=str, required=True, help="Directory with clinical notes.")
+    parser.add_argument("--summaries_dir", type=str, required=True, help="Directory with summaries.")
+    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save outputs.")
+    parser.add_argument("--train_csv", type=str, help="Path to training CSV.")
+    parser.add_argument("--val_csv", type=str, help="Path to validation CSV.")
+    parser.add_argument("--CSV_folder", type=str, help="Path to folds directory.")
+    parser.add_argument("--cross_validate", action="store_true", help="Run 5-fold cross-validation.")
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-    
     if args.prepare_data:
         output_csv = os.path.join(args.output_dir, "clinical_data.csv")
-        data = save_notes_and_summaries_to_csv(args.input_dir, args.summaries_dir, output_csv)
-        split_data_by_patient(output_csv, args.output_dir)
+        save_notes_and_summaries_to_csv(args.input_dir, args.summaries_dir, output_csv)
+        prepare_folds(output_csv, args.output_dir)
+    elif args.cross_validate:
+        if not args.CSV_folder:
+            raise ValueError("Please specify --CSV_folder for cross-validation.")
+        cross_validate(args.CSV_folder, args.output_dir)
     else:
         if args.train_csv and args.val_csv:
             fine_tune(args.train_csv, args.val_csv, args.output_dir)
