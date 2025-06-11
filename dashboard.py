@@ -53,6 +53,10 @@ def update_dictionary(patient_dict: dict, chunk: str) -> None:
             continue
         key, value = key_value[0].strip(), key_value[1].strip()
         
+        # Skip patient_id to prevent overwriting/merging
+        if key == "patient_id":
+            continue
+            
         if key not in patient_dict:
             continue
         
@@ -371,19 +375,26 @@ def generate_dashboard(df: pd.DataFrame) -> None:
 
     # Plot independent bars (biggest in the back, smallest in the front)
     for idx, (location, percentage) in enumerate(sorted_locations):
-        ax_headache.bar(0, percentage, color=bar_colors[idx], label=location.capitalize(), alpha=0.7)
+        ax_headache.bar(0, percentage, color=bar_colors[idx], label=location.capitalize(), alpha=0.9)
         
-        # Add percentage text inside the bar
-        ax_headache.text(
-            0,  # X position (center of the bar)
-            percentage - 1,  # Y position (middle of the current bar)
-            f'{percentage:.1f}%',  # Text to display
-            ha='center',  # Horizontal alignment
-            va='top',  # Vertical alignment
-            fontsize=10,  # Font size
-            color='white',  # Text color
-            fontweight='bold'  # Bold text
-        )
+    for i in range(len(sorted_locations) - 1):
+        _, val1 = sorted_locations[i]
+        _, val2 = sorted_locations[i + 1]
+
+        if val1 != val2:
+            mid = (val1 + val2) / 2
+            ax_headache.text(
+                0,
+                mid,
+                f'{val1:.1f}%',
+                ha='center',
+                va='center',
+                fontsize=10,
+                color='white',
+                fontweight='bold',
+                zorder=2
+            )
+
 
     # Formatting
     ax_headache.set_title('Headache Locations', fontsize=16, pad=15, fontweight='semibold')
@@ -392,7 +403,7 @@ def generate_dashboard(df: pd.DataFrame) -> None:
     ax_headache.set_ylim(0, y_upper_limit)  # Set y-axis limit slightly above the max percentage
     ax_headache.grid(axis='y', linestyle='--', alpha=0.5)  # Add grid lines
 
-    # Add a legend (optional, since names are now on the bars)
+    # Add a legend
     ax_headache.legend(
         loc='upper center',  # Position the legend at the top
         bbox_to_anchor=(0.5, -0.03),  # Adjust vertical position
@@ -583,10 +594,10 @@ def generate_dashboard(df: pd.DataFrame) -> None:
         # Add value labels with mean and SD for pain onset
         ax_age_distribution.text(
             idx,  # X position (center of the rectangle)
-            mean_age + std_pain[idx]+0.3,  # Y position
+            mean_age - std_pain[idx] - 0.3,  # Y position
             f'{mean_pain[idx]:.1f} ± {std_pain[idx]:.1f}',  # Text to display
             ha='center',  # Horizontal alignment
-            va='bottom',  # Vertical alignment
+            va='top',  # Vertical alignment
             fontsize=8,  # Font size
             color='#2d3436',  # Text color
             fontweight='bold'  # Bold text

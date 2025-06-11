@@ -1,15 +1,14 @@
 import os
-import re
+import gc
 import csv
-import fitz
 import torch
+import subprocess
 import argparse
 import evaluate
 import numpy as np
 import pandas as pd
-from docx import Document
 from datasets import load_dataset
-from sklearn.model_selection import train_test_split, KFold
+from sklearn.model_selection import train_test_split
 from utilities import initialize_key_value_summary
 from transformers import BartForConditionalGeneration, BartTokenizer, Trainer, TrainingArguments, DataCollatorForSeq2Seq, EarlyStoppingCallback
 
@@ -147,9 +146,11 @@ def fine_tune(training_path, validation_path, output_dir):
     keys = list(initialize_key_value_summary().keys())
 
     def preprocess_function(examples):
-        input_texts = [f'Using this list: {keys}, summarize this note: {text}' for text in examples["text"]]
-        model_inputs = tokenizer(examples["text"], max_length=1024, truncation=True, padding="max_length")
-        labels = tokenizer(examples["summary"], max_length=150, truncation=True, padding="max_length").input_ids
+        inputs = [f"Using the following note, extract structured key-value pairs about the patient's symptoms and diagnoses:\n\n{text}" for text in examples["text"]]
+        model_inputs = tokenizer(inputs, max_length=1024, truncation=True, padding="max_length")
+
+        labels = tokenizer(text_target=examples["summary"], max_length=300, truncation=True, padding="max_length").input_ids
+
         model_inputs["labels"] = labels
         return model_inputs
 
@@ -161,16 +162,22 @@ def fine_tune(training_path, validation_path, output_dir):
         output_dir=output_dir,
         eval_strategy="epoch",
         save_strategy="epoch",
+        # save_steps=500,
         learning_rate=1e-5,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
+        lr_scheduler_type="cosine",
+        warmup_steps=100,
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
         weight_decay=0.01,
-        save_total_limit=3,
-        num_train_epochs=20,
-        fp16=True,
+        save_total_limit=1,
+        num_train_epochs=4,
+        gradient_accumulation_steps=4,
+        gradient_checkpointing=True,
         load_best_model_at_end=True,
         metric_for_best_model="eval_rouge1",
         greater_is_better=True,
+        fp16=True,
+        bf16=False,
     )
 
     def compute_metrics(eval_preds):
@@ -208,6 +215,11 @@ def fine_tune(training_path, validation_path, output_dir):
     print(results)
 
     model.config.forced_bos_token_id = 0 
+    
+    del trainer
+    gc.collect()
+    torch.cuda.empty_cache()
+    
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
     print(f"Model saved to {output_dir}")
@@ -227,17 +239,21 @@ def cross_validate(csv_folder, output_dir, n_splits=5):
         model_dir = os.path.join(output_dir, f"fold_{fold + 1}", "model")
         os.makedirs(model_dir, exist_ok=True)
         
-        fine_tune(
-            training_path=train_csv,
-            validation_path=val_csv,
-            output_dir=model_dir
-        )
-        
-        # Evaluate the model on the test set
-        test_csv = os.path.join(csv_folder, f"fold_{fold + 1}", "test.csv")
-        test_results = evaluate_model(model_dir, test_csv)
-        fold_results.append(test_results)
-        print(f"Fold {fold + 1} results: {test_results}")
+        cmd = [
+            "python", "fine_tune.py",
+            "--train_csv", train_csv,
+            "--val_csv", val_csv,
+            "--output_dir", output_dir
+        ]
+
+        print(f"\033[31mRunning command: {' '.join(cmd)}\033[0m")
+        result = subprocess.run(cmd)
+
+        if result.returncode != 0:
+            print(f"❌ Fold {fold+1} failed. Exiting.")
+            break
+        else:
+            print(f"✅ Fold {fold+1} completed successfully.")
     
     # Aggregate results
     aggregated_results = aggregate_results(fold_results)

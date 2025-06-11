@@ -1,16 +1,14 @@
 import os
-import re
+import gc
 import csv
 import json
-import fitz
 import torch
 import argparse
 import evaluate
 import numpy as np
 import pandas as pd
-from docx import Document
 from datasets import load_dataset
-from sklearn.model_selection import train_test_split, KFold
+from sklearn.model_selection import train_test_split
 from utilities import initialize_key_value_summary
 from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
 from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments, DataCollatorForSeq2Seq, EarlyStoppingCallback, BitsAndBytesConfig
@@ -186,6 +184,7 @@ def fine_tune(training_path, validation_path, output_dir):
         model_name,
         quantization_config=quantization_config,
         device_map="auto",
+        torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
     )
 
@@ -220,24 +219,24 @@ def fine_tune(training_path, validation_path, output_dir):
 
     training_args = TrainingArguments(
         output_dir=output_dir,
-        evaluation_strategy="epoch",
-        save_strategy="steps",
-        save_steps=500,
-        save_total_limit=3,
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        # save_steps=500,
         learning_rate=1e-5,
         lr_scheduler_type="cosine",
         warmup_steps=100,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         weight_decay=0.01,
-        num_train_epochs=3,
+        save_total_limit=1,
+        num_train_epochs=4,
         gradient_accumulation_steps=4,
         gradient_checkpointing=True,
         load_best_model_at_end=True,
         metric_for_best_model="eval_rouge1",
         greater_is_better=True,
-        fp16=True,
-        bf16=False,
+        fp16=False,
+        bf16=True,
     )
 
     def compute_metrics(eval_preds):
@@ -282,13 +281,28 @@ def fine_tune(training_path, validation_path, output_dir):
     print(f"Model saved to {output_dir}")
 
 def cross_validate(csv_folder, output_dir, n_splits=5):
+    """Performs 5-fold cross-validation on the dataset."""
+    
     for fold in range(n_splits):
         print(f"Processing fold {fold + 1}/{n_splits}")
+        
+        # Define paths for training and validation CSV files for this fold
         train_csv = os.path.join(csv_folder, f"fold_{fold + 1}", "train.csv")
         val_csv = os.path.join(csv_folder, f"fold_{fold + 1}", "validation.csv")
+        
+        
         model_dir = os.path.join(output_dir, f"fold_{fold + 1}", "model")
         os.makedirs(model_dir, exist_ok=True)
-        fine_tune(train_csv, val_csv, model_dir)
+        
+        fine_tune(
+            training_path=train_csv,
+            validation_path=val_csv,
+            output_dir=model_dir
+        )
+        
+        # --- CRITICAL: CLEAR MEMORY BETWEEN FOLDS ---
+        torch.cuda.empty_cache()
+        gc.collect()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare data or fine-tune model for summarization.")

@@ -2,3 +2,7 @@ transformers
 torch
 pymupdf
 python-docx
+evaluate
+scikit-learn
+peft
+bitsandbytes

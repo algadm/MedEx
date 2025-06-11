@@ -10,7 +10,7 @@ from transformers import BartTokenizer, BartForConditionalGeneration, Generation
 from utilities import initialize_key_value_summary, create_chunks_from_paragraphs
 
 def load_model_and_tokenizer():
-    model_name_or_path = "/path/to/your/model"
+    model_name_or_path = "/home/lucia/Documents/Alban/MedEx/finetuned_models/fintetuned_bart_3500_prompt"
     tokenizer = BartTokenizer.from_pretrained(model_name_or_path)
     model = BartForConditionalGeneration.from_pretrained(model_name_or_path)
     return model, tokenizer
@@ -191,19 +191,20 @@ def generate_combined_summary(model, tokenizer, text, max_chunk_size=3500, model
     
     generation_config = GenerationConfig(
         max_length=model_max_tokens,
-        min_length=3,
+        min_length=50,
+        num_beams=4,
+        no_repeat_ngram_size=3,
+        repetition_penalty=2.0,
         length_penalty=1.0,
-        num_beams=8,
-        do_sample=True,
-        temperature=0.9,
-        top_k=40,
-        top_p=0.9,
+        do_sample=False,
+        # temperature=0.9,
+        # top_k=40,
+        # top_p=0.9,
     )
     
     for chunk in chunks:
-        prompt = f'Using this list: {keys}, summarize this note: {chunk}'
-        inputs = tokenizer(chunk, return_tensors="pt").to(device)
-        # , truncation=True, max_length=model_max_tokens
+        prompt = f"Using the following note, extract structured key-value pairs about the patient's symptoms and diagnoses:\n\n{chunk}"
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=model_max_tokens).to(device)
         
         if inputs["input_ids"].shape[1] > model_max_tokens:
             print(f"WARNING: Chunk exceeded {model_max_tokens} tokens, truncating.")
@@ -224,7 +225,7 @@ def process_notes(notes_folder, output_folder, model, tokenizer):
     patient_files = {}
     
     for file_name in os.listdir(notes_folder):
-        if not (file_name.endswith(".pdf") or file_name.endswith(".docx")):
+        if not (file_name.endswith(".pdf") or file_name.endswith(".docx") or file_name.endswith(".txt")):
             continue
         patient_id = file_name.split("_")[0]
         if patient_id not in patient_files:
@@ -240,6 +241,9 @@ def process_notes(notes_folder, output_folder, model, tokenizer):
                 combined_text += extract_text_from_pdf(file_path)
             elif file_name.endswith(".docx"):
                 combined_text += extract_text_from_word(file_path)
+            elif file_name.endswith(".txt"):
+                with open(file_path, 'r', encoding='utf-8') as file:
+                    combined_text += clean_text(file.read())
 
         summary = generate_combined_summary(model, tokenizer, combined_text)
         output_file_path = os.path.join(output_folder, f"{patient_id}_summary.txt")

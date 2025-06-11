@@ -18,8 +18,7 @@ def set_age_data(df):
 def set_sleep_data(df):
     # Sleep disorder data (including chronic fatigue)
     has_sleep_disorder = df['sleep_disorder_type'].notna() & (df['sleep_disorder_type'] != "")
-    has_chronic_fatigue = df['chronic_fatigue_present'] == "True"
-    sleep_disorder_percentage = (has_sleep_disorder | has_chronic_fatigue).mean() * 100
+    sleep_disorder_percentage = (has_sleep_disorder).mean() * 100
     
     return sleep_disorder_percentage
 
@@ -68,7 +67,9 @@ def set_left_stick_data(df):
     metrics_titles = ["Headache\nIntensity", "Daily Pain\nIntensity", "Diet\nScore", "TMJ pain\nRating", "Disability\nRating"]
     
     means = df[metrics].mean()
+    means = means.fillna(0) if means.isna().any() else means
     std_devs = df[metrics].std()
+    std_devs = std_devs.fillna(0) if std_devs.isna().any() else std_devs
     
     return metrics_titles, means, std_devs
 
@@ -88,76 +89,49 @@ def set_middle_stick_data(df):
     return max_opening, max_opening_no_pain
 
 def set_right_stick_data(df):
-    # Define the list of possible headache locations
-    possible_locations = ["frontal", "temporal", "posterior", "top of the head", "temple"]
+    possible_locations = {
+        "frontal": ["frontal", "forehead"],
+        "temporal": ["temporal", "side of head"],
+        "posterior": ["posterior", "back of head"],
+        "top of the head": ["top of the head", "vertex"],
+        "temple": ["temple"]
+    }
 
-    # Initialize a dictionary to count occurrences
-    location_counts = {location: 0 for location in possible_locations}
+    location_counts = {key: 0 for key in possible_locations}
 
-    # Iterate over each patient's headache_location
     for locations in df['headache_location']:
         if pd.notna(locations) and locations != "":
-            # Check for each possible location in the whole string
-            for location in possible_locations:
-                if location in locations.lower():
-                    location_counts[location] += 1
+            locations_lower = locations.lower()
+            for key, synonyms in possible_locations.items():
+                if any(re.search(rf"\b{re.escape(syn)}\b", locations_lower) for syn in synonyms):
+                    location_counts[key] += 1
 
-    # Calculate percentages
     total_patients = len(df)
     location_percentages = {location: (count / total_patients) * 100 
                             for location, count in location_counts.items()}
     
     return location_percentages
 
-def set_joint_pain_data(df):
-    # Define the list of possible joint pain areas
-    possible_areas = ["TMJ", "Neck", "Shoulder", "Back"]
 
-    # Initialize a dictionary to count occurrences
+def set_joint_pain_data(df):
+    possible_areas = ["TMJ", "Neck", "Shoulder", "Back"]
     joint_pain_counts = {area: 0 for area in possible_areas}
 
-    # Iterate over each patient's joint_pain_areas
     for areas in df['joint_pain_areas']:
         if pd.notna(areas) and areas != "":
-            # Combine left and right TMJ into a single "TMJ" category
-            if "left TMJ" in areas or "right TMJ" in areas:
+            areas_lower = areas.lower()
+            # Match "left TMJ", "right TMJ", or phrases like "TMJ pain on left side"
+            if re.search(r'\bleft\b.*tmj|\btmj.*left|\bright\b.*tmj|\btmj.*right|\btmj\b', areas_lower):
                 joint_pain_counts["TMJ"] += 1
-            # Check for other joint pain areas
             for area in possible_areas:
-                if area != "TMJ" and area.lower() in areas.lower():
+                if area != "TMJ" and area.lower() in areas_lower:
                     joint_pain_counts[area] += 1
 
-    # Calculate percentages
     total_patients = len(df)
     joint_pain_percentages = {area: (count / total_patients) * 100 
                               for area, count in joint_pain_counts.items()}
     
     return joint_pain_percentages
-
-def set_lower_stick_data(df):
-    # Define the list of possible severities
-    possible_severities = ["low", "mild", "moderate", "severe"]
-
-    # Initialize a dictionary to count occurrences
-    severity_counts = {severity: 0 for severity in possible_severities}
-
-    # Iterate over each patient's muscle_pain_score
-    for score in df['muscle_pain_score']:
-        if pd.notna(score) and score != "":
-            # Convert to lowercase for case-insensitive matching
-            score_lower = score.lower()
-            # Check for each possible severity in the score
-            for severity in possible_severities:
-                if severity in score_lower:
-                    severity_counts[severity] += 1
-                    break  # Stop checking once a match is found
-
-    # Calculate percentages
-    total_patients = len(df)
-    severity_percentages = {severity: (count / total_patients) * 100 
-                            for severity, count in severity_counts.items()}
-    
-    return severity_percentages
 
 def set_upper_donuts_data(df):
     bool_metrics = ["earache_present", "tinnitus_present", "vertigo_present", 
@@ -257,24 +231,24 @@ def set_disc_displacement_data(df):
     
     # Iterate through the dataframe
     for _, row in df.iterrows():
-        disc_displacement = str(row['disc_displacement'])
+        disc_displacement = str(row['disc_displacement']).lower()  # Normalize casing
         
-        # Left TMJ
-        if "left TMJ without reduction" in disc_displacement:
+        # LEFT SIDE
+        if re.search(r'left.*without reduction', disc_displacement):
             left_counts["w/o reduction"] += 1
-        elif "left TMJ with reduction" in disc_displacement:
+        elif re.search(r'left.*with reduction', disc_displacement):
             left_counts["w/ reduction"] += 1
-        elif "left TMJ" in disc_displacement:
+        elif 'left' in disc_displacement:
             left_counts["reduction not specified"] += 1
         else:
             left_counts["no displacement"] += 1
-        
-        # Right TMJ
-        if "right TMJ without reduction" in disc_displacement:
+
+        # RIGHT SIDE
+        if re.search(r'right.*without reduction', disc_displacement):
             right_counts["w/o reduction"] += 1
-        elif "right TMJ with reduction" in disc_displacement:
+        elif re.search(r'right.*with reduction', disc_displacement):
             right_counts["w/ reduction"] += 1
-        elif "right TMJ" in disc_displacement:
+        elif 'right' in disc_displacement:
             right_counts["reduction not specified"] += 1
         else:
             right_counts["no displacement"] += 1
@@ -288,36 +262,39 @@ def set_disc_displacement_data(df):
 
 
 def set_muscle_pain_data(df):
-    # Define pain level categories and their order
     pain_levels = ["mild", "mild to moderate", "moderate", "moderate to severe", "severe"]
-
-    # Initialize a dictionary to count occurrences of each pain level
     pain_counts = {level: 0 for level in pain_levels}
 
-    # Parse muscle_pain_score to count pain levels
     for score in df['muscle_pain_score']:
-        if pd.isna(score) or score == "":
+        if pd.isna(score) or score.strip() == "":
             continue
-        
-        # Normalize the text to lowercase
         score = score.lower()
-        
-        # Check for each pain level
-        if "mild" in score or "low" in score:
-            pain_counts["mild"] += 1
-        if "mild to moderate" in score:
-            pain_counts["mild to moderate"] += 1
-        if "moderate" in score and "moderate to severe" not in score and "high moderate" not in score:
-            pain_counts["moderate"] += 1
-        if "moderate to severe" in score or "high moderate to low severe" in score or "high moderate" in score:
-            pain_counts["moderate to severe"] += 1
-        if "severe" in score and "moderate to severe" not in score:
-            pain_counts["severe"] += 1
 
-    # Convert counts to percentages
+        # Normalize punctuation and remove hyphens
+        score = score.replace("-", " ").strip()
+
+        matched = False
+        # Match any mild-to-moderate variation
+        if re.search(r"\bmild\s+to\s+moderate\b", score) or re.search(r"\bmoderate\s+to\s+mild\b", score):
+            pain_counts["mild to moderate"] += 1
+            matched = True
+        # Match moderate-to-severe or similar phrases
+        elif re.search(r"\bmoderate\s+to\s+severe\b", score) or "high moderate" in score or "high moderate to low severe" in score:
+            pain_counts["moderate to severe"] += 1
+            matched = True
+        elif re.search(r"\bmild\w*\b", score) or re.search(r"\blow\b", score):
+            pain_counts["mild"] += 1
+            matched = True
+        elif re.search(r"\bmoderate\b", score) and not re.search(r"moderate\s+to\s+severe", score):
+            pain_counts["moderate"] += 1
+            matched = True
+        elif re.search(r"\bsevere\b", score) and not re.search(r"moderate\s+to\s+severe", score):
+            pain_counts["severe"] += 1
+            matched = True
+
     total_patients = len(df)
-    pain_percentages = {level: (count / total_patients) * 100 for level, count in pain_counts.items()}
-    
+    pain_percentages = {level: (pain_counts[level] / total_patients) * 100 for level in pain_levels}
+
     clean_pain_levels = [
         level.replace("mild to moderate", "mild\nto\nmoderate").replace("moderate to severe", "moderate\nto\nsevere")
         for level in pain_levels
