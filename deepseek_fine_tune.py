@@ -268,7 +268,8 @@ def fine_tune(training_path, validation_path, output_dir):
         callbacks=[early_stopping_callback],
     )
 
-    trainer.train(resume_from_checkpoint=True)
+    trainer.train()
+    # trainer.train(resume_from_checkpoint=True)
     results = trainer.evaluate()
     print(results)
 
