@@ -196,10 +196,9 @@ def generate_combined_summary(model, tokenizer, text, max_chunk_size=3500, model
         no_repeat_ngram_size=3,
         repetition_penalty=2.0,
         length_penalty=1.0,
-        do_sample=False,
-        # temperature=0.9,
-        # top_k=40,
-        # top_p=0.9,
+        do_sample=True,
+        temperature=0.6,
+        top_p=0.95,
     )
     
     for chunk in chunks:

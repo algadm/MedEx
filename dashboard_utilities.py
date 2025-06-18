@@ -80,11 +80,11 @@ def set_middle_stick_data(df):
         Returns NaN if no match is found.
         """
         match = re.search(r'\d+', str(value))
-        return float(match.group(0)) if match else np.nan
+        return float(match.group(0)) if match else 0
 
     # Apply the function to extract numerical values
-    max_opening = df['maximum_opening'].apply(extract_mm_value) if 'maximum_opening' in df else pd.Series([np.nan] * len(df))
-    max_opening_no_pain = df['maximum_opening_without_pain'].apply(extract_mm_value) if 'maximum_opening_without_pain' in df else pd.Series([np.nan] * len(df))
+    max_opening = df['maximum_opening'].apply(extract_mm_value) if 'maximum_opening' in df else pd.Series([0] * len(df))
+    max_opening_no_pain = df['maximum_opening_without_pain'].apply(extract_mm_value) if 'maximum_opening_without_pain' in df else pd.Series([0] * len(df))
     
     return max_opening, max_opening_no_pain
 

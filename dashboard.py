@@ -360,57 +360,66 @@ def generate_dashboard(df: pd.DataFrame) -> None:
                           fontsize=12,
                           color='#2d3436')
 
-    # Column 3: Headache Locations
-    ax_headache = fig.add_subplot(gs_bottom_left[0, 2])  # Use the 3rd column
+    # Column 3: Headache Locations - Horizontal Bar Chart
+    ax_headache = fig.add_subplot(gs_bottom_left[0, 2])
 
-    # Sort locations by percentage (descending order for drawing order)
-    sorted_locations = sorted(location_percentages.items(), key=lambda x: x[1], reverse=True)
+    # Sort locations by percentage (ascending for better horizontal bar visualization)
+    sorted_locations = sorted(location_percentages.items(), key=lambda x: x[1])
+    # Modify long labels to be on two lines
+    def format_label(label):
+        if label == "top of the head":
+            return "Top of\nthe head"
+        return label.capitalize()
 
-    # Define a color palette for the bars
-    bar_colors = ['#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3', '#a6d854']  # Distinct colors
+    locations = [format_label(loc[0]) for loc in sorted_locations]
+    percentages = [loc[1] for loc in sorted_locations]
 
-    # Get the maximum percentage to set the y-axis limit
-    max_percentage = max(location_percentages.values())
-    y_upper_limit = max_percentage * 1.10  # Add 10% above the maximum percentage
+    # Define colors for the bars
+    bar_colors = ['#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3', '#a6d854']
 
-    # Plot independent bars (biggest in the back, smallest in the front)
-    for idx, (location, percentage) in enumerate(sorted_locations):
-        ax_headache.bar(0, percentage, color=bar_colors[idx], label=location.capitalize(), alpha=0.9)
-        
-    for i in range(len(sorted_locations) - 1):
-        _, val1 = sorted_locations[i]
-        _, val2 = sorted_locations[i + 1]
+    # Plot horizontal bars
+    bars = ax_headache.barh(locations, percentages, color=bar_colors, alpha=0.7)
 
-        if val1 != val2:
-            mid = (val1 + val2) / 2
-            ax_headache.text(
-                0,
-                mid,
-                f'{val1:.1f}%',
-                ha='center',
-                va='center',
-                fontsize=10,
-                color='white',
-                fontweight='bold',
-                zorder=2
-            )
+    # Calculate threshold (1/3 of max percentage)
+    max_pct = max(percentages) * 1.2 if percentages else 1
+    threshold = max_pct / 3
 
+    # Add percentage labels with smart positioning
+    for bar in bars:
+        width = bar.get_width()
+        if width == 0:  # Special case for 0%
+            ax_headache.text(1,  # Just past 0
+                            bar.get_y() + bar.get_height()/2,
+                            f'{width:.1f}%',
+                            ha='center',
+                            va='center',
+                            fontsize=10,
+                            color='black',
+                            fontweight='bold')
+        elif width < threshold:  # Small bars - label after bar
+            ax_headache.text(width + 1,  # Right of bar
+                            bar.get_y() + bar.get_height()/2,
+                            f'{width:.1f}%',
+                            ha='left',
+                            va='center',
+                            fontsize=10,
+                            color='black',
+                            fontweight='bold')
+        else:  # Large bars - label inside bar (white text)
+            ax_headache.text(width / 2,  # Middle of bar
+                            bar.get_y() + bar.get_height()/2,
+                            f'{width:.1f}%',
+                            ha='center',
+                            va='center',
+                            fontsize=10,
+                            color='black',
+                            fontweight='bold')
 
     # Formatting
     ax_headache.set_title('Headache Locations', fontsize=16, pad=15, fontweight='semibold')
-    ax_headache.set_xticks([])  # Remove x-axis ticks
-    ax_headache.set_ylabel('Percentage', fontsize=14)
-    ax_headache.set_ylim(0, y_upper_limit)  # Set y-axis limit slightly above the max percentage
-    ax_headache.grid(axis='y', linestyle='--', alpha=0.5)  # Add grid lines
-
-    # Add a legend
-    ax_headache.legend(
-        loc='upper center',  # Position the legend at the top
-        bbox_to_anchor=(0.5, -0.03),  # Adjust vertical position
-        ncol=2,  # Display legend items in 2 columns
-        fontsize=10,  # Legend font size
-        frameon=False  # Remove legend border
-    )
+    ax_headache.set_xlabel('Percentage', fontsize=12)
+    ax_headache.set_xlim(0, max(percentages)*1.2 if max(percentages) > 0 else 10)
+    ax_headache.grid(axis='x', linestyle='--', alpha=0.5)
 
 
 
