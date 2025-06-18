@@ -1,113 +1,106 @@
 import argparse
 import os
-import re
-import json
 import fitz
 import torch
-import string
 from docx import Document
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from peft import PeftModel
 from utilities import initialize_key_value_summary, create_chunks_from_paragraphs
 
-def load_model_and_tokenizer():
-    model_name_or_path = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+def load_model_and_tokenizer(lora_adapter_path):
+    base_model_name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
     
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
-    
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name, trust_remote_code=True)
+
+    # Set padding token to avoid warnings
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     quantization_config = BitsAndBytesConfig(
-        load_in_8bit=True
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4"
     )
-    
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name_or_path, 
+
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_name,
         trust_remote_code=True,
-        torch_dtype=torch.float16,
         device_map="auto",
-        quantization_config=quantization_config
+        quantization_config=quantization_config,
+        torch_dtype=torch.float16,
+        attn_implementation="flash_attention_2"
     )
-    
-    return model, tokenizer, torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Now load LoRA adapter
+    model = PeftModel.from_pretrained(base_model, lora_adapter_path)
+    # model = model.merge_and_unload()
+    model.eval()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return model, tokenizer, device
 
 def extract_text_from_pdf(pdf_path):
     doc = fitz.open(pdf_path)
-    text = ""
-    for page in doc:
-        text += page.get_text()
+    text = "".join(page.get_text() for page in doc)
     return clean_text(text)
 
 def extract_text_from_word(docx_path):
     doc = Document(docx_path)
-    return "\n".join([clean_text(paragraph.text) for paragraph in doc.paragraphs])
+    return "\n".join(clean_text(paragraph.text) for paragraph in doc.paragraphs)
 
 def clean_text(text):
-    """
-    Cleans the text by replacing specific characters with their desired replacements.
-    
-    Args:
-        text (str): The input text to clean.
-    
-    Returns:
-        str: The cleaned text.
-    """
-    replacements = {
-        "’": "'",
-        "–": "-"
-    }
+    replacements = {"’": "'", "–": "-"}
     for old, new in replacements.items():
         text = text.replace(old, new)
     return text
 
-def generate_text(model, tokenizer, device, prompt, max_length=300):
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=2048,
-        return_attention_mask=True
-    ).to(device)
-    
+def generate_text(model, tokenizer, device, chunk, max_new_tokens=300):
+    # Build exact prompt used during fine-tuning
+    prompt = f"Summarize: {chunk}\nSummary: "
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
     with torch.no_grad():
         output = model.generate(
-            inputs["input_ids"],
+            input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
-            max_new_tokens=512,
+            max_new_tokens=200,
+            min_new_tokens=30,
             pad_token_id=tokenizer.pad_token_id,
-            temperature=0.7,
-            top_p=0.9,
-            do_sample=True
+            repetition_penalty=2.0,
+            # Add these new parameters for better structure
+            num_beams=4,
+            no_repeat_ngram_size=3,
+            early_stopping=True,
+            do_sample=True,
+            top_p=0.95,
+            temperature=0.6,
         )
 
-    return tokenizer.decode(output[0], skip_special_tokens=True)
+    # Only return newly generated tokens (not repeating input prompt)
+    generated_tokens = output[:, inputs["input_ids"].shape[1]:]
+    decoded_output = tokenizer.decode(generated_tokens[0], skip_special_tokens=True)
+    return decoded_output.strip()
 
-def generate_combined_summary(model, tokenizer, device, text, max_chunk_size=12000, max_length=300):
-    """
-    Generates a summary using DeepSeek.
-    """
+def generate_combined_summary(model, tokenizer, device, text, max_chunk_size=3500, max_new_tokens=300):
     chunks = create_chunks_from_paragraphs(text, max_chunk_size=max_chunk_size)
-    dict = initialize_key_value_summary()
-    keys = list(dict.keys())
-    
     summaries = []
-    for chunk in chunks:
-        prompt = f"Each patient has the following dicionnary: {dict}. For each of the keys, summarize the following text: {chunk}"
-        summary = generate_text(model, tokenizer, device, prompt, max_length=max_length)
-        summaries.append(summary)
-        
 
-    final_summary = "\n\n".join(summaries)
+    for chunk in chunks:
+        summary = generate_text(model, tokenizer, device, chunk, max_new_tokens=max_new_tokens)
+        summaries.append(summary)
+
+    final_summary = "\n----------------------------------------------------------------------------------------------------\n".join(summaries)
     return final_summary
 
 def process_notes(notes_folder, output_folder, device, model, tokenizer):
     patient_files = {}
-    
+
     for file_name in os.listdir(notes_folder):
-        if not (file_name.endswith(".pdf") or file_name.endswith(".docx")):
+        if not (file_name.endswith(".pdf") or file_name.endswith(".docx") or file_name.endswith(".txt")):
             continue
         patient_id = file_name.split("_")[0]
-        if patient_id not in patient_files:
-            patient_files[patient_id] = []
-        patient_files[patient_id].append(file_name)
+        patient_files.setdefault(patient_id, []).append(file_name)
 
     for patient_id, files in patient_files.items():
         print(f"Processing patient {patient_id}...")
@@ -118,26 +111,30 @@ def process_notes(notes_folder, output_folder, device, model, tokenizer):
                 combined_text += extract_text_from_pdf(file_path)
             elif file_name.endswith(".docx"):
                 combined_text += extract_text_from_word(file_path)
+            elif file_name.endswith(".txt"):
+                with open(file_path, 'r', encoding='utf-8') as file:
+                    combined_text += clean_text(file.read())
 
         summary = generate_combined_summary(model, tokenizer, device, combined_text)
         output_file_path = os.path.join(output_folder, f"{patient_id}_summary.txt")
-        
+
         with open(output_file_path, 'w', encoding='utf-8') as output_file:
             print(f"Saved summary to {output_file_path}")
             output_file.write(f"{summary}\n")
 
-def main(notes_folder, output_folder):
-    model, tokenizer, device = load_model_and_tokenizer()
+def main(notes_folder, output_folder, lora_adapter_path):
+    model, tokenizer, device = load_model_and_tokenizer(lora_adapter_path)
 
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
-    
+
     process_notes(notes_folder, output_folder, device, model, tokenizer)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Summarize clinical notes using DeepSeek")
-    parser.add_argument('--notes_folder', type=str, required=True, help="Path to the folder containing clinical notes")
-    parser.add_argument('--output_folder', type=str, required=True, help="Path to the folder to save the summaries")
+    parser = argparse.ArgumentParser(description="Summarize clinical notes using fine-tuned DeepSeek")
+    parser.add_argument('--notes_folder', type=str, required=True)
+    parser.add_argument('--output_folder', type=str, required=True)
+    parser.add_argument('--lora_adapter_path', type=str, required=True)
     
     args = parser.parse_args()
-    main(args.notes_folder, args.output_folder)
+    main(args.notes_folder, args.output_folder, args.lora_adapter_path)

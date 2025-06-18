@@ -1,6 +1,7 @@
 import os
 import gc
 import csv
+import time
 import json
 import torch
 import argparse
@@ -13,6 +14,9 @@ from utilities import initialize_key_value_summary
 from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
 from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments, DataCollatorForSeq2Seq, EarlyStoppingCallback, BitsAndBytesConfig
 from utilities import extract_text_from_pdf, extract_text_from_word, create_chunks_from_paragraphs
+
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,backend:cudaMallocAsync"
+
 
 def clean_summary(summary):
     """Cleans a single summary string by removing unnecessary newlines and ensuring consistent formatting.
@@ -74,7 +78,7 @@ def save_notes_and_summaries_to_csv(notes_folder, summaries_folder, output_csv, 
         output_csv (str): Path to save the output CSV file.
         max_chunk_size (int, optional): Maximum number of characters used for each chunk. Defaults to 12000.
     """
-    texts, summaries = []
+    texts, summaries = [], []
     for note_filename in os.listdir(notes_folder):
         if note_filename.endswith((".txt", ".pdf", ".docx")):
             patient_id = note_filename.split("_")[0]
@@ -126,7 +130,7 @@ def assign_patient_ids(data):
     
     for index, row in data.iterrows():
         # Extract patient_id from the 'summary' column using regex
-        extracted_id = pd.Series(row['summary']).str.extract(r'patient_id: (\\w+)')[0].values[0]
+        extracted_id = pd.Series(row['summary']).str.extract(r'patient_id: (\w+)')[0].values[0]
         if pd.notna(extracted_id):
             current_patient_id = extracted_id
         
@@ -193,24 +197,40 @@ def fine_tune(training_path, validation_path, output_dir):
     model = prepare_model_for_kbit_training(model)
 
     lora_config = LoraConfig(
-        r=16,  # Rank of LoRA layers
-        lora_alpha=32,  # Scaling factor
-        target_modules=["q_proj", "v_proj"],  # Apply LoRA to attention layers
-        lora_dropout=0.05,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM,  # Task type: causal language modeling
+        r=64,  # High rank to capture structural patterns (key-value pairs, sections)
+        lora_alpha=128,  # Large scaling factor to emphasize learned structure
+        target_modules=[
+            # Attention layers (structure mapping)
+            "q_proj", "k_proj", "v_proj", "o_proj",  
+            
+            # MLP layers (content selection)
+            "gate_proj", "up_proj", "down_proj"
+        ],
+        lora_dropout=0.05,  # Lower dropout to preserve structural tokens
+        bias="lora_only",   # Avoid destabilizing pretrained biases
+        task_type=TaskType.CAUSAL_LM,
     )
 
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()  # Check trainable parameters
 
     def preprocess_function(examples):
-        inputs = [f"Summarize: {text}" for text in examples["text"]]
-        model_inputs = tokenizer(inputs, max_length=3000, truncation=True, padding="max_length")
+        # Build the full supervised prompt (text + summary)
+        inputs = [
+            f"Summarize: {text}\nSummary: {summary}"
+            for text, summary in zip(examples["text"], examples["summary"])
+        ]
 
-        labels = tokenizer(text_target=examples["summary"], max_length=100, truncation=True, padding="max_length").input_ids
+        # Tokenize full concatenated text
+        model_inputs = tokenizer(
+            inputs,
+            max_length=1324,
+            truncation=True,
+            padding="longest",
+        )
 
-        model_inputs["labels"] = labels
+        model_inputs["labels"] = model_inputs["input_ids"].copy()
+
         return model_inputs
 
     tokenized_datasets = dataset.map(preprocess_function, batched=True)
@@ -219,22 +239,24 @@ def fine_tune(training_path, validation_path, output_dir):
 
     training_args = TrainingArguments(
         output_dir=output_dir,
-        eval_strategy="epoch",
+        label_names=["labels"],
+        eval_strategy="no",
         save_strategy="epoch",
+        # eval_steps=500,
         # save_steps=500,
-        learning_rate=1e-5,
+        learning_rate=5e-6,
         lr_scheduler_type="cosine",
         warmup_steps=100,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         weight_decay=0.01,
-        save_total_limit=1,
+        save_total_limit=None,
         num_train_epochs=4,
         gradient_accumulation_steps=4,
         gradient_checkpointing=True,
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_rouge1",
-        greater_is_better=True,
+        # load_best_model_at_end=True,
+        # metric_for_best_model="eval_rouge1",
+        # greater_is_better=True,
         fp16=False,
         bf16=True,
     )
@@ -246,14 +268,32 @@ def fine_tune(training_path, validation_path, output_dir):
         if isinstance(logits, tuple):
             logits = logits[0]
 
-        predictions = np.argmax(logits, axis=-1)
-        decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+        # Process in batches to avoid OOM
+        batch_size = 16
+        decoded_preds = []
+        decoded_labels = []
+        
+        for i in range(0, len(logits), batch_size):
+            batch_logits = logits[i:i+batch_size]
+            batch_labels = labels[i:i+batch_size]
+            
+            predictions = np.argmax(batch_logits, axis=-1)
+            decoded_preds.extend(tokenizer.batch_decode(predictions, skip_special_tokens=True))
 
-        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
-
-        result = metric.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
-        return {key: value * 100 for key, value in result.items()}
+            batch_labels = np.where(batch_labels != -100, batch_labels, tokenizer.pad_token_id)
+            decoded_labels.extend(tokenizer.batch_decode(batch_labels, skip_special_tokens=True))
+        
+        # Compute ROUGE in chunks
+        result = {}
+        for i in range(0, len(decoded_preds), batch_size):
+            chunk_preds = decoded_preds[i:i+batch_size]
+            chunk_labels = decoded_labels[i:i+batch_size]
+            chunk_result = metric.compute(predictions=chunk_preds, references=chunk_labels, use_stemmer=True)
+            for k, v in chunk_result.items():
+                result[k] = result.get(k, 0) + v * 100
+        
+        # Average results
+        return {k: v / (len(decoded_preds) * batch_size) for k, v in result.items()}
 
     early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=2)
 
@@ -262,23 +302,25 @@ def fine_tune(training_path, validation_path, output_dir):
         args=training_args,
         train_dataset=tokenized_datasets["train"],
         eval_dataset=tokenized_datasets["validation"],
-        tokenizer=tokenizer,
+        preprocess_logits_for_metrics=None,
         data_collator=data_collator,
-        compute_metrics=compute_metrics,
-        callbacks=[early_stopping_callback],
+        # compute_metrics=compute_metrics,
+        # callbacks=[early_stopping_callback],
     )
 
     trainer.train()
     # trainer.train(resume_from_checkpoint=True)
-    results = trainer.evaluate()
-    print(results)
+    torch.cuda.empty_cache()
+    gc.collect()
+    # results = trainer.evaluate()
+    # print(results)
+
+    # del trainer
+    # torch.cuda.empty_cache()
+    # gc.collect()
 
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
-    print(f"Model saved to {output_dir}")
-    
-    with open(os.path.join(output_dir, "final_eval_results.json"), "w") as f:
-        json.dump(results, f, indent=4)
     print(f"Model saved to {output_dir}")
 
 def cross_validate(csv_folder, output_dir, n_splits=5):
@@ -304,6 +346,7 @@ def cross_validate(csv_folder, output_dir, n_splits=5):
         # --- CRITICAL: CLEAR MEMORY BETWEEN FOLDS ---
         torch.cuda.empty_cache()
         gc.collect()
+        time.sleep(5)  # Allow GPU to fully clear
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare data or fine-tune model for summarization.")
