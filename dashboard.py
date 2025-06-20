@@ -397,7 +397,7 @@ def generate_dashboard(df: pd.DataFrame) -> None:
                             color='black',
                             fontweight='bold')
         elif width < threshold:  # Small bars - label after bar
-            ax_headache.text(width + 1,  # Right of bar
+            ax_headache.text(width + 0.2*width,  # Right of bar
                             bar.get_y() + bar.get_height()/2,
                             f'{width:.1f}%',
                             ha='left',
